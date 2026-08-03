@@ -928,332 +928,332 @@ class BDCDialog(QtWidgets.QDialog):
 
 #-------------------------------PROCESSOS DA ABA 3------------------------------------
 
-def select_radar_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Selecione a pasta de destino")
-        if folder:
-            self.radar_folder_input.setText(folder)
-
-    def build_vh_mosaic(self, target_date, tile):
-        """
-        Constrói o mosaico temporal VH para uma data alvo e tile.
-        Retorna um dicionário com:
-          - 'array': numpy array final (média temporal)
-          - 'geotransform': geotransform do grid de trabalho (CRS original)
-          - 'projection': projeção do grid de trabalho
-          - 'dates': lista de strings das datas utilizadas
-          - 'scenes': lista de nomes das cenas
-          - 'n_dates': número de datas distintas
-          - 'n_scenes': número total de cenas
-        """
-        search_window = 30
-        # Datas de busca
-        start_date = target_date.strftime("%Y-%m-%d")
-        end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
-        datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
-
-        # Conexão STAC
-        catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
-        search = catalog.search(
-            collections=["sentinel-1-rtc-1"],
-            query={
-                "bdc:tile": {"eq": tile},
-                "orbit_direction": {"eq": "DESCENDING"}
-            },
-            datetime=datetime_str
-        )
-        items = list(search.items())
-        if not items:
-            raise Exception(f"Nenhuma imagem Sentinel-1 encontrada para o tile {tile} na data {target_date}.")
-
-        self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
-        QApplication.processEvents()
-
-        # Extrai informações das cenas
-        scene_urls = []
-        scene_names = []
-        orbits = []
-        raw_datetimes = []
-        for feat in items:
-            url_vh = feat.assets['Gamma0_VH']['href']
-            scene_urls.append(url_vh)
-            scene_names.append(os.path.splitext(os.path.basename(url_vh))[0])
-            orbits.append(str(feat.properties['relative_orbit']))
-            raw_datetimes.append(feat.properties['datetime'])
-
-        calendar_dates = sorted(set(datetime.fromisoformat(d).date() for d in raw_datetimes))
-        self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
-        QApplication.processEvents()
-
-        # BBOX do tile (a partir do primeiro item)
-        bbox = items[0].bbox  # [minx, miny, maxx, maxy] EPSG:4326
-
-        # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
-        ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
-        src_srs = osr.SpatialReference()
-        src_srs.ImportFromWkt(ds_first.GetProjection())
-        tgt_srs = osr.SpatialReference()
-        tgt_srs.ImportFromEPSG(4326)
-        transform = osr.CoordinateTransformation(tgt_srs, src_srs)
-
-        # Converte os cantos da BBOX para o SRS original
-        minx, miny, maxx, maxy = bbox
-        ulx, uly, _ = transform.TransformPoint(minx, maxy)
-        lrx, lry, _ = transform.TransformPoint(maxx, miny)
-        # Garante ordem correta para projWin (ulx < lrx, uly > lry)
-        proj_win = [
-            min(ulx, lrx),
-            max(uly, lry),
-            max(ulx, lrx),
-            min(uly, lry)
-        ]
-        ds_first = None
-
-        # Processamento de cada cena: crop, resample, leitura do array
-        arrays = []
-        template_geotransform = None
-        template_projection = None
-        template_shape = None
-
-        for i, url in enumerate(scene_urls):
-            self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
+    def select_radar_folder(self):
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Selecione a pasta de destino")
+            if folder:
+                self.radar_folder_input.setText(folder)
+    
+        def build_vh_mosaic(self, target_date, tile):
+            """
+            Constrói o mosaico temporal VH para uma data alvo e tile.
+            Retorna um dicionário com:
+              - 'array': numpy array final (média temporal)
+              - 'geotransform': geotransform do grid de trabalho (CRS original)
+              - 'projection': projeção do grid de trabalho
+              - 'dates': lista de strings das datas utilizadas
+              - 'scenes': lista de nomes das cenas
+              - 'n_dates': número de datas distintas
+              - 'n_scenes': número total de cenas
+            """
+            search_window = 30
+            # Datas de busca
+            start_date = target_date.strftime("%Y-%m-%d")
+            end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
+            datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
+    
+            # Conexão STAC
+            catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
+            search = catalog.search(
+                collections=["sentinel-1-rtc-1"],
+                query={
+                    "bdc:tile": {"eq": tile},
+                    "orbit_direction": {"eq": "DESCENDING"}
+                },
+                datetime=datetime_str
+            )
+            items = list(search.items())
+            if not items:
+                raise Exception(f"Nenhuma imagem Sentinel-1 encontrada para o tile {tile} na data {target_date}.")
+    
+            self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
             QApplication.processEvents()
-
-            # Abre a cena e recorta para o tile
-            mem_crop_path = f"/vsimem/crop_{i}.tif"
-            src_ds = gdal.Open(f"/vsicurl/{url}")
-            gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
-            crop_ds = gdal.Open(mem_crop_path)
-            if template_geotransform is None:
-                template_geotransform = crop_ds.GetGeoTransform()
-                template_projection = crop_ds.GetProjection()
-                template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
-            else:
-                # Resample para o grid comum (bilinear)
-                resampled_path = f"/vsimem/resampled_{i}.tif"
-                gdal.Warp(resampled_path, crop_ds,
-                          format='MEM',
-                          xRes=template_geotransform[1],
-                          yRes=abs(template_geotransform[5]),
-                          outputBounds=[template_geotransform[0],
-                                        template_geotransform[3] + template_geotransform[5] * template_shape[0],
-                                        template_geotransform[0] + template_geotransform[1] * template_shape[1],
-                                        template_geotransform[3]],
-                          targetAlignedPixels=True,
-                          resampleAlg='bilinear')
+    
+            # Extrai informações das cenas
+            scene_urls = []
+            scene_names = []
+            orbits = []
+            raw_datetimes = []
+            for feat in items:
+                url_vh = feat.assets['Gamma0_VH']['href']
+                scene_urls.append(url_vh)
+                scene_names.append(os.path.splitext(os.path.basename(url_vh))[0])
+                orbits.append(str(feat.properties['relative_orbit']))
+                raw_datetimes.append(feat.properties['datetime'])
+    
+            calendar_dates = sorted(set(datetime.fromisoformat(d).date() for d in raw_datetimes))
+            self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
+            QApplication.processEvents()
+    
+            # BBOX do tile (a partir do primeiro item)
+            bbox = items[0].bbox  # [minx, miny, maxx, maxy] EPSG:4326
+    
+            # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
+            ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
+            src_srs = osr.SpatialReference()
+            src_srs.ImportFromWkt(ds_first.GetProjection())
+            tgt_srs = osr.SpatialReference()
+            tgt_srs.ImportFromEPSG(4326)
+            transform = osr.CoordinateTransformation(tgt_srs, src_srs)
+    
+            # Converte os cantos da BBOX para o SRS original
+            minx, miny, maxx, maxy = bbox
+            ulx, uly, _ = transform.TransformPoint(minx, maxy)
+            lrx, lry, _ = transform.TransformPoint(maxx, miny)
+            # Garante ordem correta para projWin (ulx < lrx, uly > lry)
+            proj_win = [
+                min(ulx, lrx),
+                max(uly, lry),
+                max(ulx, lrx),
+                min(uly, lry)
+            ]
+            ds_first = None
+    
+            # Processamento de cada cena: crop, resample, leitura do array
+            arrays = []
+            template_geotransform = None
+            template_projection = None
+            template_shape = None
+    
+            for i, url in enumerate(scene_urls):
+                self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
+                QApplication.processEvents()
+    
+                # Abre a cena e recorta para o tile
+                mem_crop_path = f"/vsimem/crop_{i}.tif"
+                src_ds = gdal.Open(f"/vsicurl/{url}")
+                gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
+                crop_ds = gdal.Open(mem_crop_path)
+                if template_geotransform is None:
+                    template_geotransform = crop_ds.GetGeoTransform()
+                    template_projection = crop_ds.GetProjection()
+                    template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
+                else:
+                    # Resample para o grid comum (bilinear)
+                    resampled_path = f"/vsimem/resampled_{i}.tif"
+                    gdal.Warp(resampled_path, crop_ds,
+                              format='MEM',
+                              xRes=template_geotransform[1],
+                              yRes=abs(template_geotransform[5]),
+                              outputBounds=[template_geotransform[0],
+                                            template_geotransform[3] + template_geotransform[5] * template_shape[0],
+                                            template_geotransform[0] + template_geotransform[1] * template_shape[1],
+                                            template_geotransform[3]],
+                              targetAlignedPixels=True,
+                              resampleAlg='bilinear')
+                    crop_ds = None
+                    gdal.Unlink(mem_crop_path)
+                    crop_ds = gdal.Open(resampled_path)
+                    mem_crop_path = resampled_path  # para depois deletar
+    
+                array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+                arrays.append(array)
                 crop_ds = None
                 gdal.Unlink(mem_crop_path)
-                crop_ds = gdal.Open(resampled_path)
-                mem_crop_path = resampled_path  # para depois deletar
-
-            array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
-            arrays.append(array)
-            crop_ds = None
-            gdal.Unlink(mem_crop_path)
-
-        self.radar_log_output.append("Recorte e alinhamento concluídos.")
-        QApplication.processEvents()
-
-        # --- Filtro por órbita (boxcar + razão + outcore) ---
-        filtered_arrays = self.apply_orbit_filter(arrays, orbits)
-
-        # --- Mosaico por data (média das cenas do mesmo dia) ---
-        date_to_indices = {}
-        for i, dt_str in enumerate(raw_datetimes):
-            dt = datetime.fromisoformat(dt_str).date()
-            date_to_indices.setdefault(dt, []).append(i)
-
-        date_rasters = []
-        for dt in sorted(date_to_indices.keys()):
-            idxs = date_to_indices[dt]
-            if len(idxs) == 1:
-                date_rasters.append(filtered_arrays[idxs[0]])
-            else:
-                stack = np.stack([filtered_arrays[i] for i in idxs], axis=0)
-                mean_arr = np.mean(stack, axis=0)
-                date_rasters.append(mean_arr)
-
-        # --- Média temporal final ---
-        final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
-
-        return {
-            'array': final_array,
-            'geotransform': template_geotransform,
-            'projection': template_projection,
-            'dates': [d.strftime("%Y-%m-%d") for d in sorted(date_to_indices.keys())],
-            'scenes': scene_names,
-            'n_dates': len(date_to_indices),
-            'n_scenes': len(scene_names)
-        }
-
-    def apply_orbit_filter(self, arrays, orbits):
-        """
-        Aplica o filtro por órbita: suavização boxcar 3x3, razão,
-        média das razões por órbita e multiplicação.
-        Retorna lista de arrays filtrados (mesma ordem).
-        """
-        n = len(arrays)
-        smoothed = [uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
-        ratios = []
-        for i in range(n):
-            with np.errstate(divide='ignore', invalid='ignore'):
-                rat = np.where(smoothed[i] > 0, arrays[i] / smoothed[i], 0.0)
-            ratios.append(rat)
-
-        filtered = [None] * n
-        unique_orbits = set(orbits)
-        for orb in unique_orbits:
-            idx = [i for i, o in enumerate(orbits) if o == orb]
-            # outcore = média das razões das cenas desta órbita
-            stack_ratios = np.stack([ratios[i] for i in idx], axis=0)
-            outcore = np.mean(stack_ratios, axis=0)
-            # multiplica cada imagem suavizada pelo outcore
-            for i in idx:
-                filtered[i] = smoothed[i] * outcore
-        return filtered
-
-    def process_radar_image(self):
-        """Processo principal da aba Imagem Radar."""
-        self.radar_log_output.clear()
-        # Leitura dos inputs
-        year_str = self.radar_year_input.text().strip()
-        tile = self.radar_tile_input.text().strip()
-        folder = self.radar_folder_input.text().strip()
-
-        if not year_str or not tile or not folder:
-            QtWidgets.QMessageBox.warning(self, "Erro", "Preencha ano, tile e pasta de destino.")
-            return
-
-        try:
-            year = int(year_str)
-        except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Erro", "Ano inválido.")
-            return
-
-        if not re.match(r"^\d{6}$", tile):
-            QtWidgets.QMessageBox.warning(self, "Erro", "Tile deve ter 6 dígitos (BBBPPP).")
-            return
-
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-
-        # Datas de referência
-        ref_date = datetime(year, 7, 1).date()
-        data_4m = ref_date - relativedelta(months=3)
-        data_8m = ref_date - relativedelta(months=6)
-
-        # Parâmetros fixos (igual ao R)
-        upper = -9
-        lower = -18
-        method = "near"  # usado na projeção
-
-        self.radar_log_output.append("===================================================")
-        self.radar_log_output.append(f"Processando mosaico temporal Sentinel-1 para tile {tile}, ano {year}")
-        self.radar_log_output.append("===================================================")
-        QApplication.processEvents()
-
-        # Mosaicos
-        mosaics = {}
-        for label, date in [("current", ref_date), ("4m", data_4m), ("8m", data_8m)]:
-            self.radar_log_output.append(f"\n--- Gerando mosaico {label} (referência {date}) ---")
+    
+            self.radar_log_output.append("Recorte e alinhamento concluídos.")
             QApplication.processEvents()
-            try:
-                res = self.build_vh_mosaic(date, tile)
-            except Exception as e:
-                self.radar_log_output.append(f"Erro no mosaico {label}: {e}")
-                QApplication.processEvents()
+    
+            # --- Filtro por órbita (boxcar + razão + outcore) ---
+            filtered_arrays = self.apply_orbit_filter(arrays, orbits)
+    
+            # --- Mosaico por data (média das cenas do mesmo dia) ---
+            date_to_indices = {}
+            for i, dt_str in enumerate(raw_datetimes):
+                dt = datetime.fromisoformat(dt_str).date()
+                date_to_indices.setdefault(dt, []).append(i)
+    
+            date_rasters = []
+            for dt in sorted(date_to_indices.keys()):
+                idxs = date_to_indices[dt]
+                if len(idxs) == 1:
+                    date_rasters.append(filtered_arrays[idxs[0]])
+                else:
+                    stack = np.stack([filtered_arrays[i] for i in idxs], axis=0)
+                    mean_arr = np.mean(stack, axis=0)
+                    date_rasters.append(mean_arr)
+    
+            # --- Média temporal final ---
+            final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
+    
+            return {
+                'array': final_array,
+                'geotransform': template_geotransform,
+                'projection': template_projection,
+                'dates': [d.strftime("%Y-%m-%d") for d in sorted(date_to_indices.keys())],
+                'scenes': scene_names,
+                'n_dates': len(date_to_indices),
+                'n_scenes': len(scene_names)
+            }
+    
+        def apply_orbit_filter(self, arrays, orbits):
+            """
+            Aplica o filtro por órbita: suavização boxcar 3x3, razão,
+            média das razões por órbita e multiplicação.
+            Retorna lista de arrays filtrados (mesma ordem).
+            """
+            n = len(arrays)
+            smoothed = [uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
+            ratios = []
+            for i in range(n):
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    rat = np.where(smoothed[i] > 0, arrays[i] / smoothed[i], 0.0)
+                ratios.append(rat)
+    
+            filtered = [None] * n
+            unique_orbits = set(orbits)
+            for orb in unique_orbits:
+                idx = [i for i, o in enumerate(orbits) if o == orb]
+                # outcore = média das razões das cenas desta órbita
+                stack_ratios = np.stack([ratios[i] for i in idx], axis=0)
+                outcore = np.mean(stack_ratios, axis=0)
+                # multiplica cada imagem suavizada pelo outcore
+                for i in idx:
+                    filtered[i] = smoothed[i] * outcore
+            return filtered
+    
+        def process_radar_image(self):
+            """Processo principal da aba Imagem Radar."""
+            self.radar_log_output.clear()
+            # Leitura dos inputs
+            year_str = self.radar_year_input.text().strip()
+            tile = self.radar_tile_input.text().strip()
+            folder = self.radar_folder_input.text().strip()
+    
+            if not year_str or not tile or not folder:
+                QtWidgets.QMessageBox.warning(self, "Erro", "Preencha ano, tile e pasta de destino.")
                 return
-
-            mosaics[label] = res
-            self.radar_log_output.append(f"Datas usadas ({res['n_dates']}): {', '.join(res['dates'])}")
-            self.radar_log_output.append(f"Total de cenas: {res['n_scenes']}")
-
-        # Conversão para dB, stretch, projeção e empilhamento
-        self.radar_log_output.append("\n--- Convertendo para dB, esticando e projetando... ---")
-        QApplication.processEvents()
-
-        projected_tifs = []
-        for label in ["current", "4m", "8m"]:
-            arr = mosaics[label]['array']
-            gt = mosaics[label]['geotransform']
-            proj = mosaics[label]['projection']
-
-            # 1) dB
-            db = 10 * np.log10(np.maximum(arr, 1e-10))
-            # 2) stretch [lower, upper] -> 0-254
-            db_clamped = np.clip(db, lower, upper)
-            stretched = ((db_clamped - lower) / (upper - lower) * 254).astype(np.uint8)
-
-            # Salva o raster esticado em disco (temporário) com a projeção original
-            temp_stretch = os.path.join(folder, f"temp_{label}_stretch.tif")
-            driver = gdal.GetDriverByName('GTiff')
-            ds_tmp = driver.Create(temp_stretch, stretched.shape[1], stretched.shape[0], 1, gdal.GDT_Byte)
-            ds_tmp.SetGeoTransform(gt)
-            ds_tmp.SetProjection(proj)
-            ds_tmp.GetRasterBand(1).WriteArray(stretched)
-            ds_tmp.FlushCache()
-            ds_tmp = None
-
-            # 3) Projeção para EPSG:10857, resolução 10m, nearest
-            temp_proj = os.path.join(folder, f"temp_{label}_proj.tif")
-            gdal.Warp(temp_proj, temp_stretch,
-                      dstSRS='EPSG:10857',
-                      xRes=10, yRes=10,
-                      resampleAlg='near')
-            projected_tifs.append(temp_proj)
-            os.remove(temp_stretch)
-
-        # Empilhar bandas (RGB temporal)
-        output_name = f"{tile}_VH_RGB_mean_temporal_10m.tif"
-        output_path = os.path.join(folder, output_name)
-
-        vrt_path = f"/vsimem/stack_vrt.vrt"
-        gdal.BuildVRT(vrt_path, projected_tifs, separate=True)
-        gdal.Translate(output_path, vrt_path,
-                       creationOptions=['COMPRESS=DEFLATE', 'PREDICTOR=2', 'ZLEVEL=9'])
-        gdal.Unlink(vrt_path)
-
-        # Remove temporários projetados
-        for p in projected_tifs:
-            os.remove(p)
-
-        # Adiciona ao QGIS (opcional)
-        raster_layer = QgsRasterLayer(output_path, output_name)
-        if raster_layer.isValid():
-            QgsProject.instance().addMapLayer(raster_layer)
-            self.radar_log_output.append(f"✅ Camada adicionada ao QGIS: {output_name}")
-        else:
-            self.radar_log_output.append("⚠️ Imagem salva mas não pôde ser carregada no QGIS automaticamente.")
-
-        # Relatório
-        report = [
-            "===================================================",
-            "Sentinel-1 Temporal RGB Report",
-            "===================================================",
-            f"Tile: {tile}",
-            f"Data de processamento: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            ""
-        ]
-        for label, name in [("current", "ATUAL"), ("4m", "4 MESES"), ("8m", "8 MESES")]:
-            m = mosaics[label]
-            report += [
-                f"---------------- {name} ----------------",
-                f"Data de referência: {ref_date if label=='current' else (data_4m if label=='4m' else data_8m)}",
-                f"Datas utilizadas: {', '.join(m['dates'])}",
-                f"Número de datas: {m['n_dates']}",
-                f"Número de cenas: {m['n_scenes']}",
-                "",
-                "Cenas:"
+    
+            try:
+                year = int(year_str)
+            except ValueError:
+                QtWidgets.QMessageBox.warning(self, "Erro", "Ano inválido.")
+                return
+    
+            if not re.match(r"^\d{6}$", tile):
+                QtWidgets.QMessageBox.warning(self, "Erro", "Tile deve ter 6 dígitos (BBBPPP).")
+                return
+    
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+    
+            # Datas de referência
+            ref_date = datetime(year, 7, 1).date()
+            data_4m = ref_date - relativedelta(months=3)
+            data_8m = ref_date - relativedelta(months=6)
+    
+            # Parâmetros fixos (igual ao R)
+            upper = -9
+            lower = -18
+            method = "near"  # usado na projeção
+    
+            self.radar_log_output.append("===================================================")
+            self.radar_log_output.append(f"Processando mosaico temporal Sentinel-1 para tile {tile}, ano {year}")
+            self.radar_log_output.append("===================================================")
+            QApplication.processEvents()
+    
+            # Mosaicos
+            mosaics = {}
+            for label, date in [("current", ref_date), ("4m", data_4m), ("8m", data_8m)]:
+                self.radar_log_output.append(f"\n--- Gerando mosaico {label} (referência {date}) ---")
+                QApplication.processEvents()
+                try:
+                    res = self.build_vh_mosaic(date, tile)
+                except Exception as e:
+                    self.radar_log_output.append(f"Erro no mosaico {label}: {e}")
+                    QApplication.processEvents()
+                    return
+    
+                mosaics[label] = res
+                self.radar_log_output.append(f"Datas usadas ({res['n_dates']}): {', '.join(res['dates'])}")
+                self.radar_log_output.append(f"Total de cenas: {res['n_scenes']}")
+    
+            # Conversão para dB, stretch, projeção e empilhamento
+            self.radar_log_output.append("\n--- Convertendo para dB, esticando e projetando... ---")
+            QApplication.processEvents()
+    
+            projected_tifs = []
+            for label in ["current", "4m", "8m"]:
+                arr = mosaics[label]['array']
+                gt = mosaics[label]['geotransform']
+                proj = mosaics[label]['projection']
+    
+                # 1) dB
+                db = 10 * np.log10(np.maximum(arr, 1e-10))
+                # 2) stretch [lower, upper] -> 0-254
+                db_clamped = np.clip(db, lower, upper)
+                stretched = ((db_clamped - lower) / (upper - lower) * 254).astype(np.uint8)
+    
+                # Salva o raster esticado em disco (temporário) com a projeção original
+                temp_stretch = os.path.join(folder, f"temp_{label}_stretch.tif")
+                driver = gdal.GetDriverByName('GTiff')
+                ds_tmp = driver.Create(temp_stretch, stretched.shape[1], stretched.shape[0], 1, gdal.GDT_Byte)
+                ds_tmp.SetGeoTransform(gt)
+                ds_tmp.SetProjection(proj)
+                ds_tmp.GetRasterBand(1).WriteArray(stretched)
+                ds_tmp.FlushCache()
+                ds_tmp = None
+    
+                # 3) Projeção para EPSG:10857, resolução 10m, nearest
+                temp_proj = os.path.join(folder, f"temp_{label}_proj.tif")
+                gdal.Warp(temp_proj, temp_stretch,
+                          dstSRS='EPSG:10857',
+                          xRes=10, yRes=10,
+                          resampleAlg='near')
+                projected_tifs.append(temp_proj)
+                os.remove(temp_stretch)
+    
+            # Empilhar bandas (RGB temporal)
+            output_name = f"{tile}_VH_RGB_mean_temporal_10m.tif"
+            output_path = os.path.join(folder, output_name)
+    
+            vrt_path = f"/vsimem/stack_vrt.vrt"
+            gdal.BuildVRT(vrt_path, projected_tifs, separate=True)
+            gdal.Translate(output_path, vrt_path,
+                           creationOptions=['COMPRESS=DEFLATE', 'PREDICTOR=2', 'ZLEVEL=9'])
+            gdal.Unlink(vrt_path)
+    
+            # Remove temporários projetados
+            for p in projected_tifs:
+                os.remove(p)
+    
+            # Adiciona ao QGIS (opcional)
+            raster_layer = QgsRasterLayer(output_path, output_name)
+            if raster_layer.isValid():
+                QgsProject.instance().addMapLayer(raster_layer)
+                self.radar_log_output.append(f"✅ Camada adicionada ao QGIS: {output_name}")
+            else:
+                self.radar_log_output.append("⚠️ Imagem salva mas não pôde ser carregada no QGIS automaticamente.")
+    
+            # Relatório
+            report = [
+                "===================================================",
+                "Sentinel-1 Temporal RGB Report",
+                "===================================================",
+                f"Tile: {tile}",
+                f"Data de processamento: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                ""
             ]
-            report += [f"  - {s}" for s in m['scenes']]
-            report.append("")
-
-        report_path = os.path.join(folder, f"{tile}_report.txt")
-        with open(report_path, 'w') as f:
-            f.write('\n'.join(report))
-
-        self.radar_log_output.append(f"✅ Relatório salvo: {report_path}")
-        self.radar_log_output.append(">>> Processo concluído! <<<")
-        QApplication.processEvents()
+            for label, name in [("current", "ATUAL"), ("4m", "4 MESES"), ("8m", "8 MESES")]:
+                m = mosaics[label]
+                report += [
+                    f"---------------- {name} ----------------",
+                    f"Data de referência: {ref_date if label=='current' else (data_4m if label=='4m' else data_8m)}",
+                    f"Datas utilizadas: {', '.join(m['dates'])}",
+                    f"Número de datas: {m['n_dates']}",
+                    f"Número de cenas: {m['n_scenes']}",
+                    "",
+                    "Cenas:"
+                ]
+                report += [f"  - {s}" for s in m['scenes']]
+                report.append("")
+    
+            report_path = os.path.join(folder, f"{tile}_report.txt")
+            with open(report_path, 'w') as f:
+                f.write('\n'.join(report))
+    
+            self.radar_log_output.append(f"✅ Relatório salvo: {report_path}")
+            self.radar_log_output.append(">>> Processo concluído! <<<")
+            QApplication.processEvents()
 
 #-------------------------------FIM PROCESSO ABA 3------------------------------------
 
