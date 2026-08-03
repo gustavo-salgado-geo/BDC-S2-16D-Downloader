@@ -1598,166 +1598,166 @@ class BDCDialog(QtWidgets.QDialog):
             raise Exception(f"Tile {tile} não encontrado no dicionário de bboxes. Adicione-o manualmente.")
 
     def build_vh_mosaic(self, target_date, tile):
-    """
-    Constrói o mosaico temporal VH para uma data alvo e tile.
-    Retorna um dicionário com:
-      - 'array': numpy array final (média temporal)
-      - 'geotransform': geotransform do grid de trabalho (CRS original)
-      - 'projection': projeção do grid de trabalho
-      - 'dates': lista de strings das datas utilizadas
-      - 'scenes': lista de nomes das cenas
-      - 'n_dates': número de datas distintas
-      - 'n_scenes': número total de cenas
-    """
-    search_window = 30
-    start_date = target_date.strftime("%Y-%m-%d")
-    end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
-    datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
-
-    # Obter bbox do tile usando o dicionário local
-    bbox = self.get_tile_bbox(tile)
+        """
+        Constrói o mosaico temporal VH para uma data alvo e tile.
+        Retorna um dicionário com:
+          - 'array': numpy array final (média temporal)
+          - 'geotransform': geotransform do grid de trabalho (CRS original)
+          - 'projection': projeção do grid de trabalho
+          - 'dates': lista de strings das datas utilizadas
+          - 'scenes': lista de nomes das cenas
+          - 'n_dates': número de datas distintas
+          - 'n_scenes': número total de cenas
+        """
+        search_window = 30
+        start_date = target_date.strftime("%Y-%m-%d")
+        end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
+        datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
     
-    self.radar_log_output.append(f"Buscando imagens S1 para tile {tile}...")
-    self.radar_log_output.append(f"BBox: {bbox}")
-    QApplication.processEvents()
-    
-    catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
-    
-    # Buscar imagens Sentinel-1 usando bbox
-    search = catalog.search(
-        collections=["sentinel-1-rtc-1"],
-        bbox=bbox,
-        datetime=datetime_str
-    )
-    
-    items = list(search.items())
-    
-    # Filtrar órbitas descendentes manualmente
-    items = [item for item in items 
-             if item.properties.get('orbit_direction', '').upper() == 'DESCENDING']
-    
-    if not items:
-        raise Exception(f"Nenhuma imagem Sentinel-1 encontrada para o tile {tile} na data {target_date}.")
-
-    self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
-    QApplication.processEvents()
-
-    # Extrai informações das cenas
-    scene_urls = []
-    scene_names = []
-    orbits = []
-    raw_datetimes = []
-    for feat in items:
-        url_vh = feat.assets['Gamma0_VH']['href']
-        scene_urls.append(url_vh)
-        scene_names.append(os.path.splitext(os.path.basename(url_vh))[0])
-        orbits.append(str(feat.properties['relative_orbit']))
-        raw_datetimes.append(feat.properties['datetime'])
-
-    calendar_dates = sorted(set(datetime.fromisoformat(d).date() for d in raw_datetimes))
-    self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
-    QApplication.processEvents()
-
-    # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
-    ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
-    src_srs = osr.SpatialReference()
-    src_srs.ImportFromWkt(ds_first.GetProjection())
-    tgt_srs = osr.SpatialReference()
-    tgt_srs.ImportFromEPSG(4326)
-    transform = osr.CoordinateTransformation(tgt_srs, src_srs)
-
-    # Converte os cantos da BBOX para o SRS original
-    minx, miny, maxx, maxy = bbox
-    ulx, uly, _ = transform.TransformPoint(minx, maxy)
-    lrx, lry, _ = transform.TransformPoint(maxx, miny)
-    # Garante ordem correta para projWin (ulx < lrx, uly > lry)
-    proj_win = [
-        min(ulx, lrx),
-        max(uly, lry),
-        max(ulx, lrx),
-        min(uly, lry)
-    ]
-    ds_first = None
-
-    # Processamento de cada cena: crop, resample, leitura do array
-    arrays = []
-    template_geotransform = None
-    template_projection = None
-    template_shape = None
-
-    for i, url in enumerate(scene_urls):
-        self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
-        QApplication.processEvents()
-
-        # Abre a cena e recorta para o tile
-        mem_crop_path = f"/vsimem/crop_{i}.tif"
-        src_ds = gdal.Open(f"/vsicurl/{url}")
-        gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
-        crop_ds = gdal.Open(mem_crop_path)
+        # Obter bbox do tile usando o dicionário local
+        bbox = self.get_tile_bbox(tile)
         
-        if template_geotransform is None:
-            template_geotransform = crop_ds.GetGeoTransform()
-            template_projection = crop_ds.GetProjection()
-            template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
-        else:
-            # Resample para o grid comum (bilinear)
-            resampled_path = f"/vsimem/resampled_{i}.tif"
-            gdal.Warp(resampled_path, crop_ds,
-                      format='MEM',
-                      xRes=template_geotransform[1],
-                      yRes=abs(template_geotransform[5]),
-                      outputBounds=[template_geotransform[0],
-                                    template_geotransform[3] + template_geotransform[5] * template_shape[0],
-                                    template_geotransform[0] + template_geotransform[1] * template_shape[1],
-                                    template_geotransform[3]],
-                      targetAlignedPixels=True,
-                      resampleAlg='bilinear')
+        self.radar_log_output.append(f"Buscando imagens S1 para tile {tile}...")
+        self.radar_log_output.append(f"BBox: {bbox}")
+        QApplication.processEvents()
+        
+        catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
+        
+        # Buscar imagens Sentinel-1 usando bbox
+        search = catalog.search(
+            collections=["sentinel-1-rtc-1"],
+            bbox=bbox,
+            datetime=datetime_str
+        )
+        
+        items = list(search.items())
+        
+        # Filtrar órbitas descendentes manualmente
+        items = [item for item in items 
+                 if item.properties.get('orbit_direction', '').upper() == 'DESCENDING']
+        
+        if not items:
+            raise Exception(f"Nenhuma imagem Sentinel-1 encontrada para o tile {tile} na data {target_date}.")
+    
+        self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
+        QApplication.processEvents()
+    
+        # Extrai informações das cenas
+        scene_urls = []
+        scene_names = []
+        orbits = []
+        raw_datetimes = []
+        for feat in items:
+            url_vh = feat.assets['Gamma0_VH']['href']
+            scene_urls.append(url_vh)
+            scene_names.append(os.path.splitext(os.path.basename(url_vh))[0])
+            orbits.append(str(feat.properties['relative_orbit']))
+            raw_datetimes.append(feat.properties['datetime'])
+    
+        calendar_dates = sorted(set(datetime.fromisoformat(d).date() for d in raw_datetimes))
+        self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
+        QApplication.processEvents()
+    
+        # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
+        ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
+        src_srs = osr.SpatialReference()
+        src_srs.ImportFromWkt(ds_first.GetProjection())
+        tgt_srs = osr.SpatialReference()
+        tgt_srs.ImportFromEPSG(4326)
+        transform = osr.CoordinateTransformation(tgt_srs, src_srs)
+    
+        # Converte os cantos da BBOX para o SRS original
+        minx, miny, maxx, maxy = bbox
+        ulx, uly, _ = transform.TransformPoint(minx, maxy)
+        lrx, lry, _ = transform.TransformPoint(maxx, miny)
+        # Garante ordem correta para projWin (ulx < lrx, uly > lry)
+        proj_win = [
+            min(ulx, lrx),
+            max(uly, lry),
+            max(ulx, lrx),
+            min(uly, lry)
+        ]
+        ds_first = None
+    
+        # Processamento de cada cena: crop, resample, leitura do array
+        arrays = []
+        template_geotransform = None
+        template_projection = None
+        template_shape = None
+    
+        for i, url in enumerate(scene_urls):
+            self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
+            QApplication.processEvents()
+    
+            # Abre a cena e recorta para o tile
+            mem_crop_path = f"/vsimem/crop_{i}.tif"
+            src_ds = gdal.Open(f"/vsicurl/{url}")
+            gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
+            crop_ds = gdal.Open(mem_crop_path)
+            
+            if template_geotransform is None:
+                template_geotransform = crop_ds.GetGeoTransform()
+                template_projection = crop_ds.GetProjection()
+                template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
+            else:
+                # Resample para o grid comum (bilinear)
+                resampled_path = f"/vsimem/resampled_{i}.tif"
+                gdal.Warp(resampled_path, crop_ds,
+                          format='MEM',
+                          xRes=template_geotransform[1],
+                          yRes=abs(template_geotransform[5]),
+                          outputBounds=[template_geotransform[0],
+                                        template_geotransform[3] + template_geotransform[5] * template_shape[0],
+                                        template_geotransform[0] + template_geotransform[1] * template_shape[1],
+                                        template_geotransform[3]],
+                          targetAlignedPixels=True,
+                          resampleAlg='bilinear')
+                crop_ds = None
+                gdal.Unlink(mem_crop_path)
+                crop_ds = gdal.Open(resampled_path)
+                mem_crop_path = resampled_path  # para depois deletar
+    
+            array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+            arrays.append(array)
             crop_ds = None
             gdal.Unlink(mem_crop_path)
-            crop_ds = gdal.Open(resampled_path)
-            mem_crop_path = resampled_path  # para depois deletar
-
-        array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
-        arrays.append(array)
-        crop_ds = None
-        gdal.Unlink(mem_crop_path)
-
-    self.radar_log_output.append("Recorte e alinhamento concluídos.")
-    QApplication.processEvents()
-
-    # --- Filtro por órbita (boxcar + razão + outcore) ---
-    filtered_arrays = self.apply_orbit_filter(arrays, orbits)
-
-    # --- Mosaico por data (média das cenas do mesmo dia) ---
-    date_to_indices = {}
-    for i, dt_str in enumerate(raw_datetimes):
-        dt = datetime.fromisoformat(dt_str).date()
-        if dt not in date_to_indices:
-            date_to_indices[dt] = []
-        date_to_indices[dt].append(i)
-
-    date_rasters = []
-    for dt in sorted(date_to_indices.keys()):
-        idxs = date_to_indices[dt]
-        if len(idxs) == 1:
-            date_rasters.append(filtered_arrays[idxs[0]])
-        else:
-            stack = np.stack([filtered_arrays[i] for i in idxs], axis=0)
-            mean_arr = np.mean(stack, axis=0)
-            date_rasters.append(mean_arr)
-
-    # --- Média temporal final ---
-    final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
-
-    return {
-        'array': final_array,
-        'geotransform': template_geotransform,
-        'projection': template_projection,
-        'dates': [d.strftime("%Y-%m-%d") for d in sorted(date_to_indices.keys())],
-        'scenes': scene_names,
-        'n_dates': len(date_to_indices),
-        'n_scenes': len(scene_names)
-    }
+    
+        self.radar_log_output.append("Recorte e alinhamento concluídos.")
+        QApplication.processEvents()
+    
+        # --- Filtro por órbita (boxcar + razão + outcore) ---
+        filtered_arrays = self.apply_orbit_filter(arrays, orbits)
+    
+        # --- Mosaico por data (média das cenas do mesmo dia) ---
+        date_to_indices = {}
+        for i, dt_str in enumerate(raw_datetimes):
+            dt = datetime.fromisoformat(dt_str).date()
+            if dt not in date_to_indices:
+                date_to_indices[dt] = []
+            date_to_indices[dt].append(i)
+    
+        date_rasters = []
+        for dt in sorted(date_to_indices.keys()):
+            idxs = date_to_indices[dt]
+            if len(idxs) == 1:
+                date_rasters.append(filtered_arrays[idxs[0]])
+            else:
+                stack = np.stack([filtered_arrays[i] for i in idxs], axis=0)
+                mean_arr = np.mean(stack, axis=0)
+                date_rasters.append(mean_arr)
+    
+        # --- Média temporal final ---
+        final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
+    
+        return {
+            'array': final_array,
+            'geotransform': template_geotransform,
+            'projection': template_projection,
+            'dates': [d.strftime("%Y-%m-%d") for d in sorted(date_to_indices.keys())],
+            'scenes': scene_names,
+            'n_dates': len(date_to_indices),
+            'n_scenes': len(scene_names)
+        }
 
     def apply_orbit_filter(self, arrays, orbits):
         """
