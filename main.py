@@ -1,13 +1,10 @@
-# Importação de Bibliotecas
-
-import os # permite interagir com o sistema operacional.
-import re # procurar, validar e manipular padrões em textos
-import numpy as np # para trabalhar com os array na normalização de 8 bits 
-import requests # usada para fazer requisições HTTP
+import os
+import re
+import numpy as np
+import requests
 
 import pystac_client
 
-# PyQt > para toda a interface gráfica
 from qgis.PyQt import QtWidgets
 from qgis.core import QgsRasterLayer, QgsVectorLayer, QgsProject
 from PyQt5.QtWidgets import QApplication, QTabWidget, QAction
@@ -17,10 +14,10 @@ from osgeo import gdal, ogr, osr, gdal_array
 from io import BytesIO
 
 from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta 
+from dateutil.relativedelta import relativedelta
 
 from scipy import ndimage
-from scipy.ndimage import uniform_filter 
+from scipy.ndimage import uniform_filter
 
 from qgis.PyQt.QtGui import QIcon
 #-----------------------------FIM Importação de Bibliotecas -----------------------------------------------------------------------------------------------------------
@@ -712,28 +709,89 @@ class BDCDialog(QtWidgets.QDialog):
         if folder:
             self.radar_folder_input.setText(folder)
 
+    def get_tile_bbox(self, tile):
+        """
+        Obtém o bbox (EPSG:4326) de um tile BDC consultando
+        a API de grid do BDC. Fallback para STAC Sentinel-2.
+        """
+        # Tentativa 1: API do BDC Grid
+        url = f"https://data.inpe.br/bdc/api/grid/v2/tiles/{tile}"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                # A estrutura da resposta pode variar. Tentar extrair o bbox
+                if 'bbox' in data:
+                    bbox = data['bbox']
+                    self.radar_log_output.append(f"BBox obtido via API Grid: {bbox}")
+                    QApplication.processEvents()
+                    return bbox
+                elif 'geometry' in data:
+                    # Extrair bbox da geometria
+                    coords = data['geometry']['coordinates'][0]
+                    minx = min(c[0] for c in coords)
+                    miny = min(c[1] for c in coords)
+                    maxx = max(c[0] for c in coords)
+                    maxy = max(c[1] for c in coords)
+                    bbox = [minx, miny, maxx, maxy]
+                    self.radar_log_output.append(f"BBox obtido via API Grid (geometry): {bbox}")
+                    QApplication.processEvents()
+                    return bbox
+        except Exception as e:
+            self.radar_log_output.append(f"API Grid falhou: {e}. Tentando STAC S2...")
+            QApplication.processEvents()
+
+        # Tentativa 2: STAC Sentinel-2
+        try:
+            catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
+            search = catalog.search(
+                collections=["S2-16D-2"],
+                query={"bdc:tile": {"eq": tile}},
+                limit=1
+            )
+            items = list(search.items())
+            if items:
+                bbox = list(items[0].bbox)
+                self.radar_log_output.append(f"BBox obtido via STAC S2: {bbox}")
+                QApplication.processEvents()
+                return bbox
+        except Exception as e:
+            self.radar_log_output.append(f"STAC S2 falhou: {e}")
+            QApplication.processEvents()
+
+        raise Exception(f"Não foi possível obter o bbox para o tile {tile}")
+
     def build_vh_mosaic(self, target_date, tile):
         search_window = 30
         start_date = target_date.strftime("%Y-%m-%d")
         end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
         datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
 
+        # Obter bbox do tile
+        bbox = self.get_tile_bbox(tile)
+        
         catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
+        
+        # Buscar imagens Sentinel-1 usando bbox
         search = catalog.search(
             collections=["sentinel-1-rtc-1"],
-            query={
-                "bdc:tiles": {"eq": tile},
-                "orbit_direction": {"eq": "DESCENDING"}
-            },
+            bbox=bbox,
             datetime=datetime_str
         )
+        
         items = list(search.items())
+        
+        # Filtrar órbitas descendentes manualmente
+        items = [item for item in items 
+                 if item.properties.get('orbit_direction', '').upper() == 'DESCENDING']
+        
         if not items:
             raise Exception(f"Nenhuma imagem Sentinel-1 encontrada para o tile {tile} na data {target_date}.")
 
         self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
         QApplication.processEvents()
 
+        # Extrai informações das cenas
         scene_urls = []
         scene_names = []
         orbits = []
@@ -749,8 +807,7 @@ class BDCDialog(QtWidgets.QDialog):
         self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
         QApplication.processEvents()
 
-        bbox = items[0].bbox
-
+        # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
         ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
         src_srs = osr.SpatialReference()
         src_srs.ImportFromWkt(ds_first.GetProjection())
@@ -758,6 +815,7 @@ class BDCDialog(QtWidgets.QDialog):
         tgt_srs.ImportFromEPSG(4326)
         transform = osr.CoordinateTransformation(tgt_srs, src_srs)
 
+        # Converte os cantos da BBOX para o SRS original
         minx, miny, maxx, maxy = bbox
         ulx, uly, _ = transform.TransformPoint(minx, maxy)
         lrx, lry, _ = transform.TransformPoint(maxx, miny)
@@ -769,6 +827,7 @@ class BDCDialog(QtWidgets.QDialog):
         ]
         ds_first = None
 
+        # Processamento de cada cena: crop, resample, leitura do array
         arrays = []
         template_geotransform = None
         template_projection = None
@@ -778,6 +837,7 @@ class BDCDialog(QtWidgets.QDialog):
             self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
             QApplication.processEvents()
 
+            # Abre a cena e recorta para o tile
             mem_crop_path = f"/vsimem/crop_{i}.tif"
             src_ds = gdal.Open(f"/vsicurl/{url}")
             gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
@@ -787,6 +847,7 @@ class BDCDialog(QtWidgets.QDialog):
                 template_projection = crop_ds.GetProjection()
                 template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
             else:
+                # Resample para o grid comum (bilinear)
                 resampled_path = f"/vsimem/resampled_{i}.tif"
                 gdal.Warp(resampled_path, crop_ds,
                           format='MEM',
@@ -811,9 +872,10 @@ class BDCDialog(QtWidgets.QDialog):
         self.radar_log_output.append("Recorte e alinhamento concluídos.")
         QApplication.processEvents()
 
+        # --- Filtro por órbita (boxcar + razão + outcore) ---
         filtered_arrays = self.apply_orbit_filter(arrays, orbits)
 
-        # Agrupamento por data (corrigido: sem setdefault)
+        # --- Mosaico por data (média das cenas do mesmo dia) ---
         date_to_indices = {}
         for i, dt_str in enumerate(raw_datetimes):
             dt = datetime.fromisoformat(dt_str).date()
@@ -831,6 +893,7 @@ class BDCDialog(QtWidgets.QDialog):
                 mean_arr = np.mean(stack, axis=0)
                 date_rasters.append(mean_arr)
 
+        # --- Média temporal final ---
         final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
 
         return {
@@ -844,6 +907,11 @@ class BDCDialog(QtWidgets.QDialog):
         }
 
     def apply_orbit_filter(self, arrays, orbits):
+        """
+        Aplica o filtro por órbita: suavização boxcar 3x3, razão,
+        média das razões por órbita e multiplicação.
+        Retorna lista de arrays filtrados (mesma ordem).
+        """
         n = len(arrays)
         smoothed = [uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
         ratios = []
@@ -863,6 +931,7 @@ class BDCDialog(QtWidgets.QDialog):
         return filtered
 
     def process_radar_image(self):
+        """Processo principal da aba Imagem Radar."""
         self.radar_log_output.clear()
         year_str = self.radar_year_input.text().strip()
         tile = self.radar_tile_input.text().strip()
