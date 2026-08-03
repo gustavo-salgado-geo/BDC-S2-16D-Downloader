@@ -20,7 +20,8 @@ from scipy import ndimage
 from scipy.ndimage import uniform_filter
 
 from qgis.PyQt.QtGui import QIcon
-#-----------------------------FIM Importação de Bibliotecas -----------------------------------------------------------------------------------------------------------
+
+# ----------------------------- FIM Importação de Bibliotecas ------------------------------------
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VETORIZAÇÃO DE NUVENS (SCL)
@@ -119,7 +120,10 @@ def vectorize_cloud_mask(cloud_path, output_gpkg):
         cloud_ds = None
         return output_gpkg
     except Exception as e:
+        # CORREÇÃO: registrar o erro para depuração
+        print(f"Erro em vectorize_cloud_mask: {e}")
         return None
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BDCDialog(QtWidgets.QDialog):
@@ -485,10 +489,18 @@ class BDCDialog(QtWidgets.QDialog):
                 vsimem_path = f"/vsimem/{tile}_{band_key}.tif"
                 gdal.FileFromMemBuffer(vsimem_path, band_bytes.getvalue())
                 ds = gdal.Open(vsimem_path)
+                if ds is None:
+                    self.tiles_processed_output.append(f"❌ Falha ao abrir {band_key} em memória.")
+                    return
                 band_data[band_key] = ds.GetRasterBand(1).ReadAsArray()
                 if band_key == band_order[0]:
                     projection = ds.GetProjection()
                     geotransform = ds.GetGeoTransform()
+
+            # CORREÇÃO: verifica se todas as bandas foram carregadas
+            if any(b not in band_data for b in band_order):
+                self.tiles_processed_output.append(f"❌ Bandas incompletas para {tile}.")
+                continue
 
             sufixo = "8bit" if normalize else "orig"
             output_name = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}_{sufixo}.tif"
@@ -576,10 +588,19 @@ class BDCDialog(QtWidgets.QDialog):
 
     def create_rgb(self, r, g, b, output_path, projection, geotransform, normalize=False):
         driver = gdal.GetDriverByName('GTiff')
+        # CORREÇÃO: definir tipo de dado corretamente
         if normalize:
             out_dtype = gdal.GDT_Byte
         else:
-            out_dtype = gdal_array.NumericTypeCodeToGDALTypeCode(r.dtype)
+            # Usar o tipo do array de entrada
+            if r.dtype == np.uint8:
+                out_dtype = gdal.GDT_Byte
+            elif r.dtype == np.uint16:
+                out_dtype = gdal.GDT_UInt16
+            elif r.dtype == np.int16:
+                out_dtype = gdal.GDT_Int16
+            else:
+                out_dtype = gdal.GDT_Float32
         out_ds = driver.Create(output_path, r.shape[1], r.shape[0], 3, out_dtype)
         out_ds.SetProjection(projection)
         out_ds.SetGeoTransform(geotransform)
@@ -714,7 +735,7 @@ class BDCDialog(QtWidgets.QDialog):
         Retorna o bbox do tile BDC usando dicionário local de coordenadas.
         Formato: [minx, miny, maxx, maxy] em EPSG:4326
         """
-        # Dicionário com bboxes de todos os tiles BDC
+        # Dicionário com bboxes de todos os tiles BDC (mesmo da versão original)
         known_tiles = {
             "001014": [-74.87107, -8.019303, -73.83495, -7.00971],
             "002011": [-73.69892, -5.256667, -72.67687, -4.245657],
@@ -939,7 +960,7 @@ class BDCDialog(QtWidgets.QDialog):
             "016015": [-60.34256, -9.598864, -59.34839, -8.637702],
             "016016": [-60.36475, -10.53964, -59.36704, -9.579166],
             "016017": [-60.38711, -11.47993, -59.38582, -10.51989],
-            "016018": [-60.40961, -12.41996, -59.40474, -11.46011],
+            "016018": [-60.40961, -12.41996, -59.40474, -11.47993],
             "016019": [-60.43228, -13.35999, -59.42379, -12.40008],
             "016020": [-60.45511, -14.30026, -59.44297, -13.34003],
             "016021": [-60.47811, -15.24104, -59.46229, -14.28023],
@@ -1004,12 +1025,12 @@ class BDCDialog(QtWidgets.QDialog):
             "019012": [-57.38027, -6.810269, -56.40623, -5.855261],
             "019013": [-57.39197, -7.754063, -56.41453, -6.800487],
             "019014": [-57.40377, -8.696647, -56.4229, -7.74426],
-            "019015": [-57.41564, -9.638264, -56.43132, -8.686822],
+            "019015": [-57.41564, -9.638264, -56.43132, -8.696647],
             "019016": [-57.42759, -10.57915, -56.4398, -9.628413],
-            "019017": [-57.43963, -11.51956, -56.44834, -10.56928],
-            "019018": [-57.45176, -12.45973, -56.45694, -11.50965],
-            "019019": [-57.46397, -13.39991, -56.4656, -12.44979],
-            "019020": [-57.47627, -14.34034, -56.47433, -13.38993],
+            "019017": [-57.43963, -11.51956, -56.44834, -10.57915],
+            "019018": [-57.45176, -12.45973, -56.45694, -11.51956],
+            "019019": [-57.46397, -13.39991, -56.4656, -12.45973],
+            "019020": [-57.47627, -14.34034, -56.47433, -13.39991],
             "019021": [-57.48865, -15.28128, -56.48311, -14.33032],
             "019022": [-57.50113, -16.22299, -56.49196, -15.27122],
             "019023": [-57.51369, -17.16572, -56.50087, -16.21288],
@@ -1659,7 +1680,10 @@ class BDCDialog(QtWidgets.QDialog):
         QApplication.processEvents()
     
         # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
+        # CORREÇÃO: verificar se a primeira cena é acessível
         ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
+        if ds_first is None:
+            raise Exception(f"Não foi possível abrir a primeira cena: {scene_urls[0]}")
         src_srs = osr.SpatialReference()
         src_srs.ImportFromWkt(ds_first.GetProjection())
         tgt_srs = osr.SpatialReference()
@@ -1692,8 +1716,17 @@ class BDCDialog(QtWidgets.QDialog):
             # Abre a cena e recorta para o tile
             mem_crop_path = f"/vsimem/crop_{i}.tif"
             src_ds = gdal.Open(f"/vsicurl/{url}")
-            gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
+            if src_ds is None:
+                raise Exception(f"Não foi possível abrir a cena: {url}")
+            
+            # CORREÇÃO: verificar se o Translate foi bem-sucedido
+            err = gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
+            if err is None:
+                raise Exception(f"Falha ao criar crop para {url}")
+            
             crop_ds = gdal.Open(mem_crop_path)
+            if crop_ds is None:
+                raise Exception(f"Crop não gerado para {url}")
             
             if template_geotransform is None:
                 template_geotransform = crop_ds.GetGeoTransform()
@@ -1715,6 +1748,8 @@ class BDCDialog(QtWidgets.QDialog):
                 crop_ds = None
                 gdal.Unlink(mem_crop_path)
                 crop_ds = gdal.Open(resampled_path)
+                if crop_ds is None:
+                    raise Exception(f"Falha ao abrir resampled para {url}")
                 mem_crop_path = resampled_path  # para depois deletar
     
             array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
@@ -1769,8 +1804,9 @@ class BDCDialog(QtWidgets.QDialog):
         smoothed = [uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
         ratios = []
         for i in range(n):
+            # CORREÇÃO: divisão segura evitando divisão por zero
             with np.errstate(divide='ignore', invalid='ignore'):
-                rat = np.where(smoothed[i] > 0, arrays[i] / smoothed[i], 0.0)
+                rat = np.divide(arrays[i], smoothed[i], out=np.zeros_like(arrays[i]), where=smoothed[i]>0)
             ratios.append(rat)
 
         filtered = [None] * n
@@ -1817,95 +1853,116 @@ class BDCDialog(QtWidgets.QDialog):
         QApplication.processEvents()
 
         mosaics = {}
-        for label, date in [("current", ref_date), ("4m", data_4m), ("8m", data_8m)]:
-            self.radar_log_output.append(f"\n--- Gerando mosaico {label} (referência {date}) ---")
-            QApplication.processEvents()
-            try:
-                res = self.build_vh_mosaic(date, tile)
-            except Exception as e:
-                self.radar_log_output.append(f"Erro no mosaico {label}: {e}")
+        temp_files = []  # para limpeza em caso de erro
+
+        try:
+            for label, date in [("current", ref_date), ("4m", data_4m), ("8m", data_8m)]:
+                self.radar_log_output.append(f"\n--- Gerando mosaico {label} (referência {date}) ---")
                 QApplication.processEvents()
-                return
-            mosaics[label] = res
-            self.radar_log_output.append(f"Datas usadas ({res['n_dates']}): {', '.join(res['dates'])}")
-            self.radar_log_output.append(f"Total de cenas: {res['n_scenes']}")
+                try:
+                    res = self.build_vh_mosaic(date, tile)
+                except Exception as e:
+                    self.radar_log_output.append(f"Erro no mosaico {label}: {e}")
+                    QApplication.processEvents()
+                    return
+                mosaics[label] = res
+                self.radar_log_output.append(f"Datas usadas ({res['n_dates']}): {', '.join(res['dates'])}")
+                self.radar_log_output.append(f"Total de cenas: {res['n_scenes']}")
 
-        self.radar_log_output.append("\n--- Convertendo para dB, esticando e projetando... ---")
-        QApplication.processEvents()
+            self.radar_log_output.append("\n--- Convertendo para dB, esticando e projetando... ---")
+            QApplication.processEvents()
 
-        projected_tifs = []
-        for label in ["current", "4m", "8m"]:
-            arr = mosaics[label]['array']
-            gt = mosaics[label]['geotransform']
-            proj = mosaics[label]['projection']
+            projected_tifs = []
+            for label in ["current", "4m", "8m"]:
+                arr = mosaics[label]['array']
+                gt = mosaics[label]['geotransform']
+                proj = mosaics[label]['projection']
 
-            db = 10 * np.log10(np.maximum(arr, 1e-10))
-            db_clamped = np.clip(db, lower, upper)
-            stretched = ((db_clamped - lower) / (upper - lower) * 254).astype(np.uint8)
+                db = 10 * np.log10(np.maximum(arr, 1e-10))
+                db_clamped = np.clip(db, lower, upper)
+                stretched = ((db_clamped - lower) / (upper - lower) * 254).astype(np.uint8)
 
-            temp_stretch = os.path.join(folder, f"temp_{label}_stretch.tif")
-            driver = gdal.GetDriverByName('GTiff')
-            ds_tmp = driver.Create(temp_stretch, stretched.shape[1], stretched.shape[0], 1, gdal.GDT_Byte)
-            ds_tmp.SetGeoTransform(gt)
-            ds_tmp.SetProjection(proj)
-            ds_tmp.GetRasterBand(1).WriteArray(stretched)
-            ds_tmp.FlushCache()
-            ds_tmp = None
+                temp_stretch = os.path.join(folder, f"temp_{label}_stretch.tif")
+                temp_files.append(temp_stretch)
+                driver = gdal.GetDriverByName('GTiff')
+                ds_tmp = driver.Create(temp_stretch, stretched.shape[1], stretched.shape[0], 1, gdal.GDT_Byte)
+                ds_tmp.SetGeoTransform(gt)
+                ds_tmp.SetProjection(proj)
+                ds_tmp.GetRasterBand(1).WriteArray(stretched)
+                ds_tmp.FlushCache()
+                ds_tmp = None
 
-            temp_proj = os.path.join(folder, f"temp_{label}_proj.tif")
-            gdal.Warp(temp_proj, temp_stretch,
-                      dstSRS='EPSG:10857',
-                      xRes=10, yRes=10,
-                      resampleAlg='near')
-            projected_tifs.append(temp_proj)
-            os.remove(temp_stretch)
+                temp_proj = os.path.join(folder, f"temp_{label}_proj.tif")
+                temp_files.append(temp_proj)
+                gdal.Warp(temp_proj, temp_stretch,
+                          dstSRS='EPSG:10857',
+                          xRes=10, yRes=10,
+                          resampleAlg='near')
+                projected_tifs.append(temp_proj)
 
-        output_name = f"{tile}_VH_RGB_mean_temporal_10m.tif"
-        output_path = os.path.join(folder, output_name)
+            output_name = f"{tile}_VH_RGB_mean_temporal_10m.tif"
+            output_path = os.path.join(folder, output_name)
 
-        vrt_path = f"/vsimem/stack_vrt.vrt"
-        gdal.BuildVRT(vrt_path, projected_tifs, separate=True)
-        gdal.Translate(output_path, vrt_path,
-                       creationOptions=['COMPRESS=DEFLATE', 'PREDICTOR=2', 'ZLEVEL=9'])
-        gdal.Unlink(vrt_path)
-        for p in projected_tifs:
-            os.remove(p)
+            vrt_path = f"/vsimem/stack_vrt.vrt"
+            gdal.BuildVRT(vrt_path, projected_tifs, separate=True)
+            gdal.Translate(output_path, vrt_path,
+                           creationOptions=['COMPRESS=DEFLATE', 'PREDICTOR=2', 'ZLEVEL=9'])
+            gdal.Unlink(vrt_path)
 
-        raster_layer = QgsRasterLayer(output_path, output_name)
-        if raster_layer.isValid():
-            QgsProject.instance().addMapLayer(raster_layer)
-            self.radar_log_output.append(f"✅ Camada adicionada ao QGIS: {output_name}")
-        else:
-            self.radar_log_output.append("⚠️ Imagem salva mas não pôde ser carregada no QGIS automaticamente.")
+            raster_layer = QgsRasterLayer(output_path, output_name)
+            if raster_layer.isValid():
+                QgsProject.instance().addMapLayer(raster_layer)
+                self.radar_log_output.append(f"✅ Camada adicionada ao QGIS: {output_name}")
+            else:
+                self.radar_log_output.append("⚠️ Imagem salva mas não pôde ser carregada no QGIS automaticamente.")
 
-        report = [
-            "===================================================",
-            "Sentinel-1 Temporal RGB Report",
-            "===================================================",
-            f"Tile: {tile}",
-            f"Data de processamento: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            ""
-        ]
-        for label, name in [("current", "ATUAL"), ("4m", "4 MESES"), ("8m", "8 MESES")]:
-            m = mosaics[label]
-            report += [
-                f"---------------- {name} ----------------",
-                f"Data de referência: {ref_date if label=='current' else (data_4m if label=='4m' else data_8m)}",
-                f"Datas utilizadas: {', '.join(m['dates'])}",
-                f"Número de datas: {m['n_dates']}",
-                f"Número de cenas: {m['n_scenes']}",
-                "",
-                "Cenas:"
+            report = [
+                "===================================================",
+                "Sentinel-1 Temporal RGB Report",
+                "===================================================",
+                f"Tile: {tile}",
+                f"Data de processamento: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                ""
             ]
-            report += [f"  - {s}" for s in m['scenes']]
-            report.append("")
+            for label, name in [("current", "ATUAL"), ("4m", "4 MESES"), ("8m", "8 MESES")]:
+                m = mosaics[label]
+                report += [
+                    f"---------------- {name} ----------------",
+                    f"Data de referência: {ref_date if label=='current' else (data_4m if label=='4m' else data_8m)}",
+                    f"Datas utilizadas: {', '.join(m['dates'])}",
+                    f"Número de datas: {m['n_dates']}",
+                    f"Número de cenas: {m['n_scenes']}",
+                    "",
+                    "Cenas:"
+                ]
+                report += [f"  - {s}" for s in m['scenes']]
+                report.append("")
 
-        report_path = os.path.join(folder, f"{tile}_report.txt")
-        with open(report_path, 'w') as f:
-            f.write('\n'.join(report))
+            report_path = os.path.join(folder, f"{tile}_report.txt")
+            with open(report_path, 'w') as f:
+                f.write('\n'.join(report))
 
-        self.radar_log_output.append(f"✅ Relatório salvo: {report_path}")
-        self.radar_log_output.append(">>> Processo concluído! <<<")
+            self.radar_log_output.append(f"✅ Relatório salvo: {report_path}")
+            self.radar_log_output.append(">>> Processo concluído! <<<")
+
+        except Exception as e:
+            self.radar_log_output.append(f"❌ Erro durante o processamento: {e}")
+            import traceback
+            self.radar_log_output.append(traceback.format_exc())
+        finally:
+            # CORREÇÃO: limpeza de arquivos temporários
+            for f in temp_files:
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except:
+                    pass
+            for p in projected_tifs:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except:
+                    pass
         QApplication.processEvents()
 
 
