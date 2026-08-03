@@ -1963,5 +1963,5 @@ class BDC_downloader_S216D:
         if self.dialog is None:
             self.dialog = BDCDialog()
         self.dialog.show()
-        self.raise_()
-        self.activateWindow()
+        self.dialog.raise_()
+        self.dialog.activateWindow()
