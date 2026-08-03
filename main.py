@@ -1648,7 +1648,7 @@ class BDCDialog(QtWidgets.QDialog):
         orbits = []
         raw_datetimes = []
         for feat in items:
-            url_vh = feat.assets['Gamma0_VH']['href']
+            url_vh = feat.assets['Gamma0_VH'].href
             scene_urls.append(url_vh)
             scene_names.append(os.path.splitext(os.path.basename(url_vh))[0])
             orbits.append(str(feat.properties['relative_orbit']))
