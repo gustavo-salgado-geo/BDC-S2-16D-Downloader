@@ -13,7 +13,7 @@ from qgis.core import QgsRasterLayer, QgsVectorLayer, QgsProject
 from PyQt5.QtWidgets import QApplication, QTabWidget, QAction
 from PyQt5.QtCore import Qt
 
-from osgeo import gdal, ogr, osr
+from osgeo import gdal, ogr, osr, gdal_array
 from io import BytesIO
 
 from datetime import datetime, timedelta
@@ -175,6 +175,10 @@ class BDCDialog(QtWidgets.QDialog):
         main_layout.addWidget(QtWidgets.QLabel("Pasta de destino:"))# titulo que fica acima do campo de digitação3
         main_layout.addLayout(folder_layout)#campo de digitação3 recebe valor
 
+        # Opção para escolher entre dado original (bruto) ou normalizado para 8 bits
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalizar RGB para 8 bits (padrão: manter dado original)")
+        self.normalize_checkbox.setChecked(False)
+        main_layout.addWidget(self.normalize_checkbox)
         
         #Botão de Execução 1 
         self.download_button_alt = QtWidgets.QPushButton("Opção 1 >>>>>  Criar VRT da Composição RGB (R11_G08_B04) - Para Visualização Rápida")#define texto do botão
@@ -516,6 +520,10 @@ class BDCDialog(QtWidgets.QDialog):
         year, month, day = date_str[:4], date_str[4:6], date_str[6:8]
 
         
+        # Verifica a opção de normalização escolhida na interface (padrão: dado original)
+        normalize = self.normalize_checkbox.isChecked()
+
+        
         #Realiza a Busca
         for tile in tiles:
             bbb, ppp = tile[:3], tile[3:]
@@ -549,21 +557,25 @@ class BDCDialog(QtWidgets.QDialog):
                     geotransform = ds.GetGeoTransform() # coleta a projeção e a transformação geoespacial do arquivo.
 
             # Cria o nome do arquivo de saída para o raster, incorporando o tile, a data e a ordem das bandas no nome
-            output_name = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}.tif"
+            sufixo = "8bit" if normalize else "orig"
+            output_name = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}_{sufixo}.tif"
             
             # Define o caminho completo onde o arquivo de saída será salvo, combinando o diretório de destino (folder) e o nome do arquivo
             output_path = os.path.join(folder, output_name)
             
             # Cria o nome da camada de saída que será usada no QGIS, novamente incorporando o tile, a data e as bandas
-            output_layer = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}"
+            output_layer = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}_{sufixo}"
+
             
             # A função recebe os dados das bandas, o caminho do arquivo de saída, a projeção e a transformação geoespacial
             self.create_rgb(
                 band_data[band_order[0]], # R
                 band_data[band_order[1]], # G
                 band_data[band_order[2]], # B
-                output_path, projection, geotransform
+                output_path, projection, geotransform,
+                normalize=normalize
             )
+
             
             # Cria uma camada raster no QGIS a partir do arquivo TIFF gerado e atribui um nome à camada
             raster_layer = QgsRasterLayer(output_path, output_layer)
@@ -667,14 +679,29 @@ class BDCDialog(QtWidgets.QDialog):
         return (((array - array_min) / (array_max - array_min)) * 255).astype(np.uint8)
 
     #Função para criar os RGB de 8 bits
-    def create_rgb(self, r, g, b, output_path, projection, geotransform):
+    def create_rgb(self, r, g, b, output_path, projection, geotransform, normalize=False):
         driver = gdal.GetDriverByName('GTiff')
-        out_ds = driver.Create(output_path, r.shape[1], r.shape[0], 3, gdal.GDT_Byte)
+ 
+        if normalize:
+            # Modo normalizado: converte cada banda para 8 bits (0-255)
+            out_dtype = gdal.GDT_Byte
+        else:
+            # Modo original: mantém o tipo de dado nativo das bandas (ex: UInt16 do Sentinel-2)
+            out_dtype = gdal_array.NumericTypeCodeToGDALTypeCode(r.dtype)
+ 
+        out_ds = driver.Create(output_path, r.shape[1], r.shape[0], 3, out_dtype)
         out_ds.SetProjection(projection)
         out_ds.SetGeoTransform(geotransform)
-        out_ds.GetRasterBand(1).WriteArray(self.normalize_to_8bit(r))
-        out_ds.GetRasterBand(2).WriteArray(self.normalize_to_8bit(g))
-        out_ds.GetRasterBand(3).WriteArray(self.normalize_to_8bit(b))
+ 
+        if normalize:
+            out_ds.GetRasterBand(1).WriteArray(self.normalize_to_8bit(r))
+            out_ds.GetRasterBand(2).WriteArray(self.normalize_to_8bit(g))
+            out_ds.GetRasterBand(3).WriteArray(self.normalize_to_8bit(b))
+        else:
+            out_ds.GetRasterBand(1).WriteArray(r)
+            out_ds.GetRasterBand(2).WriteArray(g)
+            out_ds.GetRasterBand(3).WriteArray(b)
+ 
         out_ds.FlushCache()
         out_ds = None
 
