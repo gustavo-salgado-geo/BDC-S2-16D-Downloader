@@ -722,7 +722,7 @@ class BDCDialog(QtWidgets.QDialog):
         search = catalog.search(
             collections=["sentinel-1-rtc-1"],
             query={
-                "bdc:tile": {"eq": tile},
+                "bdc:tiles": {"eq": tile},
                 "orbit_direction": {"eq": "DESCENDING"}
             },
             datetime=datetime_str
