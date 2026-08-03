@@ -120,7 +120,6 @@ def vectorize_cloud_mask(cloud_path, output_gpkg):
         cloud_ds = None
         return output_gpkg
     except Exception as e:
-        # CORREÇÃO: registrar o erro para depuração
         print(f"Erro em vectorize_cloud_mask: {e}")
         return None
 
@@ -497,7 +496,6 @@ class BDCDialog(QtWidgets.QDialog):
                     projection = ds.GetProjection()
                     geotransform = ds.GetGeoTransform()
 
-            # CORREÇÃO: verifica se todas as bandas foram carregadas
             if any(b not in band_data for b in band_order):
                 self.tiles_processed_output.append(f"❌ Bandas incompletas para {tile}.")
                 continue
@@ -588,11 +586,9 @@ class BDCDialog(QtWidgets.QDialog):
 
     def create_rgb(self, r, g, b, output_path, projection, geotransform, normalize=False):
         driver = gdal.GetDriverByName('GTiff')
-        # CORREÇÃO: definir tipo de dado corretamente
         if normalize:
             out_dtype = gdal.GDT_Byte
         else:
-            # Usar o tipo do array de entrada
             if r.dtype == np.uint8:
                 out_dtype = gdal.GDT_Byte
             elif r.dtype == np.uint16:
@@ -1635,7 +1631,6 @@ class BDCDialog(QtWidgets.QDialog):
         end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
         datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
     
-        # Obter bbox do tile usando o dicionário local
         bbox = self.get_tile_bbox(tile)
         
         self.radar_log_output.append(f"Buscando imagens S1 para tile {tile}...")
@@ -1644,7 +1639,6 @@ class BDCDialog(QtWidgets.QDialog):
         
         catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
         
-        # Buscar imagens Sentinel-1 usando bbox
         search = catalog.search(
             collections=["sentinel-1-rtc-1"],
             bbox=bbox,
@@ -1652,8 +1646,6 @@ class BDCDialog(QtWidgets.QDialog):
         )
         
         items = list(search.items())
-        
-        # Filtrar órbitas descendentes manualmente
         items = [item for item in items 
                  if item.properties.get('orbit_direction', '').upper() == 'DESCENDING']
         
@@ -1663,7 +1655,6 @@ class BDCDialog(QtWidgets.QDialog):
         self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
         QApplication.processEvents()
     
-        # Extrai informações das cenas
         scene_urls = []
         scene_names = []
         orbits = []
@@ -1679,8 +1670,6 @@ class BDCDialog(QtWidgets.QDialog):
         self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
         QApplication.processEvents()
     
-        # Abre a primeira cena para obter o SRS original e definir o grid de trabalho
-        # CORREÇÃO: verificar se a primeira cena é acessível
         ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
         if ds_first is None:
             raise Exception(f"Não foi possível abrir a primeira cena: {scene_urls[0]}")
@@ -1690,11 +1679,9 @@ class BDCDialog(QtWidgets.QDialog):
         tgt_srs.ImportFromEPSG(4326)
         transform = osr.CoordinateTransformation(tgt_srs, src_srs)
     
-        # Converte os cantos da BBOX para o SRS original
         minx, miny, maxx, maxy = bbox
         ulx, uly, _ = transform.TransformPoint(minx, maxy)
         lrx, lry, _ = transform.TransformPoint(maxx, miny)
-        # Garante ordem correta para projWin (ulx < lrx, uly > lry)
         proj_win = [
             min(ulx, lrx),
             max(uly, lry),
@@ -1703,7 +1690,6 @@ class BDCDialog(QtWidgets.QDialog):
         ]
         ds_first = None
     
-        # Processamento de cada cena: crop, resample, leitura do array
         arrays = []
         template_geotransform = None
         template_projection = None
@@ -1713,13 +1699,11 @@ class BDCDialog(QtWidgets.QDialog):
             self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
             QApplication.processEvents()
     
-            # Abre a cena e recorta para o tile
             mem_crop_path = f"/vsimem/crop_{i}.tif"
             src_ds = gdal.Open(f"/vsicurl/{url}")
             if src_ds is None:
                 raise Exception(f"Não foi possível abrir a cena: {url}")
             
-            # CORREÇÃO: verificar se o Translate foi bem-sucedido
             err = gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
             if err is None:
                 raise Exception(f"Falha ao criar crop para {url}")
@@ -1733,7 +1717,6 @@ class BDCDialog(QtWidgets.QDialog):
                 template_projection = crop_ds.GetProjection()
                 template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
             else:
-                # Resample para o grid comum (bilinear)
                 resampled_path = f"/vsimem/resampled_{i}.tif"
                 gdal.Warp(resampled_path, crop_ds,
                           format='MEM',
@@ -1750,7 +1733,7 @@ class BDCDialog(QtWidgets.QDialog):
                 crop_ds = gdal.Open(resampled_path)
                 if crop_ds is None:
                     raise Exception(f"Falha ao abrir resampled para {url}")
-                mem_crop_path = resampled_path  # para depois deletar
+                mem_crop_path = resampled_path
     
             array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
             arrays.append(array)
@@ -1760,10 +1743,8 @@ class BDCDialog(QtWidgets.QDialog):
         self.radar_log_output.append("Recorte e alinhamento concluídos.")
         QApplication.processEvents()
     
-        # --- Filtro por órbita (boxcar + razão + outcore) ---
         filtered_arrays = self.apply_orbit_filter(arrays, orbits)
     
-        # --- Mosaico por data (média das cenas do mesmo dia) ---
         date_to_indices = {}
         for i, dt_str in enumerate(raw_datetimes):
             dt = datetime.fromisoformat(dt_str).date()
@@ -1781,7 +1762,6 @@ class BDCDialog(QtWidgets.QDialog):
                 mean_arr = np.mean(stack, axis=0)
                 date_rasters.append(mean_arr)
     
-        # --- Média temporal final ---
         final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
     
         return {
@@ -1795,16 +1775,10 @@ class BDCDialog(QtWidgets.QDialog):
         }
 
     def apply_orbit_filter(self, arrays, orbits):
-        """
-        Aplica o filtro por órbita: suavização boxcar 3x3, razão,
-        média das razões por órbita e multiplicação.
-        Retorna lista de arrays filtrados (mesma ordem).
-        """
         n = len(arrays)
         smoothed = [uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
         ratios = []
         for i in range(n):
-            # CORREÇÃO: divisão segura evitando divisão por zero
             with np.errstate(divide='ignore', invalid='ignore'):
                 rat = np.divide(arrays[i], smoothed[i], out=np.zeros_like(arrays[i]), where=smoothed[i]>0)
             ratios.append(rat)
@@ -1853,7 +1827,8 @@ class BDCDialog(QtWidgets.QDialog):
         QApplication.processEvents()
 
         mosaics = {}
-        temp_files = []  # para limpeza em caso de erro
+        temp_files = []
+        projected_tifs = []  # CORREÇÃO: inicializado antes do try
 
         try:
             for label, date in [("current", ref_date), ("4m", data_4m), ("8m", data_8m)]:
@@ -1872,7 +1847,6 @@ class BDCDialog(QtWidgets.QDialog):
             self.radar_log_output.append("\n--- Convertendo para dB, esticando e projetando... ---")
             QApplication.processEvents()
 
-            projected_tifs = []
             for label in ["current", "4m", "8m"]:
                 arr = mosaics[label]['array']
                 gt = mosaics[label]['geotransform']
@@ -1950,7 +1924,6 @@ class BDCDialog(QtWidgets.QDialog):
             import traceback
             self.radar_log_output.append(traceback.format_exc())
         finally:
-            # CORREÇÃO: limpeza de arquivos temporários
             for f in temp_files:
                 try:
                     if os.path.exists(f):
@@ -1990,5 +1963,5 @@ class BDC_downloader_S216D:
         if self.dialog is None:
             self.dialog = BDCDialog()
         self.dialog.show()
-        self.dialog.raise_()
-        self.dialog.activateWindow()
+        self.raise_()
+        self.activateWindow()
