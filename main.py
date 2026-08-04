@@ -1670,7 +1670,11 @@ class BDCDialog(QtWidgets.QDialog):
         self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
         QApplication.processEvents()
     
-        ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
+        ds_first = gdal.Open(scene_urls[0])
+        if ds_first is None:
+            # fallback para /vsicurl/
+            ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
+        
         if ds_first is None:
             raise Exception(f"Não foi possível abrir a primeira cena: {scene_urls[0]}")
         src_srs = osr.SpatialReference()
@@ -1700,7 +1704,12 @@ class BDCDialog(QtWidgets.QDialog):
             QApplication.processEvents()
     
             mem_crop_path = f"/vsimem/crop_{i}.tif"
-            src_ds = gdal.Open(f"/vsicurl/{url}")
+            src_ds = gdal.Open(url)
+
+            if src_ds is None:
+                # fallback para /vsicurl/
+                src_ds = gdal.Open(f"/vsicurl/{url}")
+                        
             if src_ds is None:
                 raise Exception(f"Não foi possível abrir a cena: {url}")
             
