@@ -1719,8 +1719,8 @@ class BDCDialog(QtWidgets.QDialog):
                 template_projection = crop_ds.GetProjection()
                 template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
             else:
-                 resampled_path = f"/vsimem/resampled_{i}.tif"
-                 warp_result = gdal.Warp(
+                resampled_path = f"/vsimem/resampled_{i}.tif"
+                warp_result = gdal.Warp(
                                 resampled_path, crop_ds,
                                 width=template_shape[1],
                                 height=template_shape[0],
@@ -1732,17 +1732,17 @@ class BDCDialog(QtWidgets.QDialog):
                                 ],
                                 resampleAlg='bilinear'
                             )
-                   crop_ds = None
-                   gdal.Unlink(mem_crop_path)
+                crop_ds = None
+                gdal.Unlink(mem_crop_path)
             
-                   if warp_result is None:
-                      raise Exception(f"Falha ao reamostrar cena: {url}")
-                    warp_result = None  # fecha/flusha o dataset para garantir gravação em /vsimem/
+                if warp_result is None:
+                    raise Exception(f"Falha ao reamostrar cena: {url}")
+                warp_result = None  # fecha/flusha o dataset para garantir gravação em /vsimem/
             
-                   crop_ds = gdal.Open(resampled_path)
-                   if crop_ds is None:
-                      raise Exception(f"Falha ao abrir resampled para {url}")
-                   mem_crop_path = resampled_path
+                crop_ds = gdal.Open(resampled_path)
+                if crop_ds is None:
+                    raise Exception(f"Falha ao abrir resampled para {url}")
+                mem_crop_path = resampled_path
 
             array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
             arrays.append(array)
