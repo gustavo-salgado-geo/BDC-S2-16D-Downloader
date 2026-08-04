@@ -1617,44 +1617,36 @@ class BDCDialog(QtWidgets.QDialog):
     def build_vh_mosaic(self, target_date, tile):
         """
         Constrói o mosaico temporal VH para uma data alvo e tile.
-        Retorna um dicionário com:
-          - 'array': numpy array final (média temporal)
-          - 'geotransform': geotransform do grid de trabalho (CRS original)
-          - 'projection': projeção do grid de trabalho
-          - 'dates': lista de strings das datas utilizadas
-          - 'scenes': lista de nomes das cenas
-          - 'n_dates': número de datas distintas
-          - 'n_scenes': número total de cenas
         """
         search_window = 30
         start_date = target_date.strftime("%Y-%m-%d")
         end_date = (target_date + timedelta(days=search_window)).strftime("%Y-%m-%d")
         datetime_str = f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
-    
+
         bbox = self.get_tile_bbox(tile)
-        
+
         self.radar_log_output.append(f"Buscando imagens S1 para tile {tile}...")
         self.radar_log_output.append(f"BBox: {bbox}")
         QApplication.processEvents()
-        
+
         catalog = pystac_client.Client.open("https://data.inpe.br/bdc/stac/v1/")
-        
+
         search = catalog.search(
             collections=["sentinel-1-rtc-1"],
             bbox=bbox,
             datetime=datetime_str
         )
-        
+
         items = list(search.items())
-        items = [item for item in items 
+        items = [item for item in items
                  if item.properties.get('orbit_direction', '').upper() == 'DESCENDING']
-        
+
         if not items:
             raise Exception(f"Nenhuma imagem Sentinel-1 encontrada para o tile {tile} na data {target_date}.")
-    
+
         self.radar_log_output.append(f"Encontradas {len(items)} cenas no total.")
         QApplication.processEvents()
-    
+
         scene_urls = []
         scene_names = []
         orbits = []
@@ -1665,23 +1657,28 @@ class BDCDialog(QtWidgets.QDialog):
             scene_names.append(os.path.splitext(os.path.basename(url_vh))[0])
             orbits.append(str(feat.properties['relative_orbit']))
             raw_datetimes.append(feat.properties['datetime'])
-    
-        calendar_dates = sorted(set(datetime.fromisoformat(d).date() for d in raw_datetimes))
+
+        # ISO 8601 com sufixo 'Z' só é aceito por datetime.fromisoformat a partir do
+        # Python 3.11 — normaliza para '+00:00' para funcionar em qualquer versão.
+        def _parse_iso(dt_str):
+            return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+
+        calendar_dates = sorted(set(_parse_iso(d).date() for d in raw_datetimes))
         self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
         QApplication.processEvents()
 
         gdal.SetConfigOption('CPL_CURL_IGNORE_ERROR', 'YES')
-        
+
         ds_first = gdal.Open(f"/vsicurl/{scene_urls[0]}")
         if ds_first is None:
             raise Exception(f"Não foi possível abrir a primeira cena: {scene_urls[0]}")
-            
+
         src_srs = osr.SpatialReference()
         src_srs.ImportFromWkt(ds_first.GetProjection())
         tgt_srs = osr.SpatialReference()
         tgt_srs.ImportFromEPSG(4326)
         transform = osr.CoordinateTransformation(tgt_srs, src_srs)
-    
+
         minx, miny, maxx, maxy = bbox
         ulx, uly, _ = transform.TransformPoint(minx, maxy)
         lrx, lry, _ = transform.TransformPoint(maxx, miny)
@@ -1692,69 +1689,82 @@ class BDCDialog(QtWidgets.QDialog):
             min(uly, lry)
         ]
         ds_first = None
-    
+
         arrays = []
         template_geotransform = None
         template_projection = None
         template_shape = None
-    
+
         for i, url in enumerate(scene_urls):
             self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
             QApplication.processEvents()
-    
+
             mem_crop_path = f"/vsimem/crop_{i}.tif"
             src_ds = gdal.Open(f"/vsicurl/{url}")
             if src_ds is None:
                 raise Exception(f"Não foi possível abrir a cena: {url}")
-            
+
             err = gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
+            src_ds = None
             if err is None:
                 raise Exception(f"Falha ao criar crop para {url}")
-            
+            err = None  # fecha/flusha o dataset de saída do Translate
+
             crop_ds = gdal.Open(mem_crop_path)
             if crop_ds is None:
                 raise Exception(f"Crop não gerado para {url}")
-            
+
             if template_geotransform is None:
                 template_geotransform = crop_ds.GetGeoTransform()
                 template_projection = crop_ds.GetProjection()
                 template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
             else:
                 resampled_path = f"/vsimem/resampled_{i}.tif"
-                gdal.Warp(resampled_path, crop_ds,
-                          format='MEM',
-                          xRes=template_geotransform[1],
-                          yRes=abs(template_geotransform[5]),
-                          outputBounds=[template_geotransform[0],
-                                        template_geotransform[3] + template_geotransform[5] * template_shape[0],
-                                        template_geotransform[0] + template_geotransform[1] * template_shape[1],
-                                        template_geotransform[3]],
-                          targetAlignedPixels=True,
-                          resampleAlg='bilinear')
+                # IMPORTANTE: sem format='MEM' — assim o Warp grava de fato em
+                # /vsimem/ (driver GTiff, inferido pela extensão .tif) e o resultado
+                # pode ser reaberto depois com gdal.Open(resampled_path).
+                warp_result = gdal.Warp(
+                    resampled_path, crop_ds,
+                    xRes=template_geotransform[1],
+                    yRes=abs(template_geotransform[5]),
+                    outputBounds=[
+                        template_geotransform[0],
+                        template_geotransform[3] + template_geotransform[5] * template_shape[0],
+                        template_geotransform[0] + template_geotransform[1] * template_shape[1],
+                        template_geotransform[3]
+                    ],
+                    targetAlignedPixels=True,
+                    resampleAlg='bilinear'
+                )
                 crop_ds = None
                 gdal.Unlink(mem_crop_path)
+
+                if warp_result is None:
+                    raise Exception(f"Falha ao reamostrar cena: {url}")
+                warp_result = None  # fecha/flusha o dataset para garantir gravação em /vsimem/
+
                 crop_ds = gdal.Open(resampled_path)
                 if crop_ds is None:
                     raise Exception(f"Falha ao abrir resampled para {url}")
                 mem_crop_path = resampled_path
-    
+
             array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
             arrays.append(array)
             crop_ds = None
             gdal.Unlink(mem_crop_path)
-    
+
         self.radar_log_output.append("Recorte e alinhamento concluídos.")
         QApplication.processEvents()
-    
+
         filtered_arrays = self.apply_orbit_filter(arrays, orbits)
-    
+
         date_to_indices = {}
         for i, dt_str in enumerate(raw_datetimes):
-            dt = datetime.fromisoformat(dt_str).date()
+            dt = _parse_iso(dt_str).date()
             if dt not in date_to_indices:
                 date_to_indices[dt] = []
             date_to_indices[dt].append(i)
-    
+
         date_rasters = []
         for dt in sorted(date_to_indices.keys()):
             idxs = date_to_indices[dt]
@@ -1764,9 +1774,9 @@ class BDCDialog(QtWidgets.QDialog):
                 stack = np.stack([filtered_arrays[i] for i in idxs], axis=0)
                 mean_arr = np.mean(stack, axis=0)
                 date_rasters.append(mean_arr)
-    
+
         final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
-    
+
         return {
             'array': final_array,
             'geotransform': template_geotransform,
