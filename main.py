@@ -1719,39 +1719,39 @@ class BDCDialog(QtWidgets.QDialog):
                 template_projection = crop_ds.GetProjection()
                 template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
             else:
-                resampled_path = f"/vsimem/resampled_{i}.tif"
-                # IMPORTANTE: sem format='MEM' — assim o Warp grava de fato em
-                # /vsimem/ (driver GTiff, inferido pela extensão .tif) e o resultado
-                # pode ser reaberto depois com gdal.Open(resampled_path).
-                warp_result = gdal.Warp(
-                    resampled_path, crop_ds,
-                    xRes=template_geotransform[1],
-                    yRes=abs(template_geotransform[5]),
-                    outputBounds=[
-                        template_geotransform[0],
-                        template_geotransform[3] + template_geotransform[5] * template_shape[0],
-                        template_geotransform[0] + template_geotransform[1] * template_shape[1],
-                        template_geotransform[3]
-                    ],
-                    targetAlignedPixels=True,
-                    resampleAlg='bilinear'
-                )
-                crop_ds = None
-                gdal.Unlink(mem_crop_path)
-
-                if warp_result is None:
-                    raise Exception(f"Falha ao reamostrar cena: {url}")
-                warp_result = None  # fecha/flusha o dataset para garantir gravação em /vsimem/
-
-                crop_ds = gdal.Open(resampled_path)
-                if crop_ds is None:
-                    raise Exception(f"Falha ao abrir resampled para {url}")
-                mem_crop_path = resampled_path
+                 resampled_path = f"/vsimem/resampled_{i}.tif"
+                 warp_result = gdal.Warp(
+                                resampled_path, crop_ds,
+                                width=template_shape[1],
+                                height=template_shape[0],
+                                outputBounds=[
+                                    template_geotransform[0],
+                                    template_geotransform[3] + template_geotransform[5] * template_shape[0],
+                                    template_geotransform[0] + template_geotransform[1] * template_shape[1],
+                                    template_geotransform[3]
+                                ],
+                                resampleAlg='bilinear'
+                            )
+                   crop_ds = None
+                   gdal.Unlink(mem_crop_path)
+            
+                   if warp_result is None:
+                      raise Exception(f"Falha ao reamostrar cena: {url}")
+                    warp_result = None  # fecha/flusha o dataset para garantir gravação em /vsimem/
+            
+                   crop_ds = gdal.Open(resampled_path)
+                   if crop_ds is None:
+                      raise Exception(f"Falha ao abrir resampled para {url}")
+                   mem_crop_path = resampled_path
 
             array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
             arrays.append(array)
             crop_ds = None
             gdal.Unlink(mem_crop_path)
+
+        shapes = {a.shape for a in arrays}
+        if len(shapes) > 1:
+            raise Exception(f"Cenas com shapes diferentes após o recorte/reamostragem: {shapes}")
 
         self.radar_log_output.append("Recorte e alinhamento concluídos.")
         QApplication.processEvents()
