@@ -16,8 +16,7 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-from scipy import ndimage
-from scipy.ndimage import uniform_filter
+import scipy.ndimage as ndimage
 
 from qgis.PyQt.QtGui import QIcon
 
@@ -1614,6 +1613,33 @@ class BDCDialog(QtWidgets.QDialog):
         else:
             raise Exception(f"Tile {tile} não encontrado no dicionário de bboxes. Adicione-o manualmente.")
 
+    def _merge_first_valid(self, arrays_list):
+        """
+        Equivalente a terra::merge(sprc(tile_list)) no R: a primeira imagem da
+        lista 'vence' em cada pixel; onde ela é NaN (nodata), o valor é
+        preenchido pela próxima imagem da lista que tiver dado válido naquele
+        pixel. Não é média — é mosaico "primeiro válido vence".
+        """
+        result = arrays_list[0].copy()
+        for arr in arrays_list[1:]:
+            nan_mask = np.isnan(result)
+            result[nan_mask] = arr[nan_mask]
+        return result
+
+    def nan_uniform_filter(self, arr, size=3, mode='constant', cval=np.nan):
+        """
+        Uniform filter (boxcar mean) that ignores NaN values.
+        Returns NaN only where all pixels in the window are NaN.
+        """
+        kernel = np.ones((size, size), dtype=np.float32)
+        arr_finite = np.nan_to_num(arr, nan=0.0)
+        sum_finite = ndimage.convolve(arr_finite, kernel, mode=mode, cval=0.0)
+        mask = np.isfinite(arr).astype(np.float32)
+        count = ndimage.convolve(mask, kernel, mode=mode, cval=0.0)
+        smooth = np.divide(sum_finite, count, out=np.zeros_like(arr), where=count > 0)
+        smooth[count == 0] = np.nan
+        return smooth
+
     def build_vh_mosaic(self, target_date, tile):
         """
         Constrói o mosaico temporal VH para uma data alvo e tile.
@@ -1658,13 +1684,12 @@ class BDCDialog(QtWidgets.QDialog):
             orbits.append(str(feat.properties['relative_orbit']))
             raw_datetimes.append(feat.properties['datetime'])
 
-        # ISO 8601 com sufixo 'Z' só é aceito por datetime.fromisoformat a partir do
-        # Python 3.11 — normaliza para '+00:00' para funcionar em qualquer versão.
         def _parse_iso(dt_str):
             return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
 
-        calendar_dates = sorted(set(_parse_iso(d).date() for d in raw_datetimes))
-        self.radar_log_output.append(f"Datas de aquisição únicas: {len(calendar_dates)}")
+        calendar_dates_full = [_parse_iso(d).date() for d in raw_datetimes]
+        unique_dates = sorted(set(calendar_dates_full))
+        self.radar_log_output.append(f"Datas de aquisição únicas: {len(unique_dates)}")
         QApplication.processEvents()
 
         gdal.SetConfigOption('CPL_CURL_IGNORE_ERROR', 'YES')
@@ -1675,6 +1700,11 @@ class BDCDialog(QtWidgets.QDialog):
 
         src_srs = osr.SpatialReference()
         src_srs.ImportFromWkt(ds_first.GetProjection())
+        native_res_x = ds_first.GetGeoTransform()[1]
+        native_res_y = abs(ds_first.GetGeoTransform()[5])
+        ds_first = None
+
+
         tgt_srs = osr.SpatialReference()
         tgt_srs.ImportFromEPSG(4326)
         transform = osr.CoordinateTransformation(tgt_srs, src_srs)
@@ -1688,94 +1718,108 @@ class BDCDialog(QtWidgets.QDialog):
             max(ulx, lrx),
             min(uly, lry)
         ]
-        ds_first = None
+
+        template_shape = (
+            int(round((proj_win[1] - proj_win[3]) / native_res_y)),  # rows
+            int(round((proj_win[2] - proj_win[0]) / native_res_x))    # cols
+        )
+
+        template_geotransform = (
+            proj_win[0], native_res_x, 0.0,
+            proj_win[1], 0.0, -native_res_y
+        )
+
+        template_projection = src_srs.ExportToWkt()
 
         arrays = []
-        template_geotransform = None
-        template_projection = None
-        template_shape = None
 
         for i, url in enumerate(scene_urls):
             self.radar_log_output.append(f"Processando cena {i+1}/{len(scene_urls)}: {scene_names[i]}")
             QApplication.processEvents()
 
-            mem_crop_path = f"/vsimem/crop_{i}.tif"
             src_ds = gdal.Open(f"/vsicurl/{url}")
             if src_ds is None:
                 raise Exception(f"Não foi possível abrir a cena: {url}")
 
-            err = gdal.Translate(mem_crop_path, src_ds, projWin=proj_win)
+            # --- CORREÇÃO 1: nodata ---
+            nodata_val = src_ds.GetRasterBand(1).GetNoDataValue()
+            # Se o arquivo não tiver nodata, não mascare nada (mantenha os valores originais)
+            if nodata_val is None:
+                # Nenhuma máscara será aplicada
+                pass
+
+            resampled_path = f"/vsimem/resampled_{i}.tif"
+            warp_result = gdal.Warp(
+                resampled_path, src_ds,
+                width=template_shape[1],
+                height=template_shape[0],
+                outputBounds=[
+                    template_geotransform[0],
+                    template_geotransform[3] + template_geotransform[5] * template_shape[0],
+                    template_geotransform[0] + template_geotransform[1] * template_shape[1],
+                    template_geotransform[3]
+                ],
+                dstSRS=template_projection,
+                resampleAlg='near',          
+                srcNodata=nodata_val if nodata_val is not None else None,
+                dstNodata=nodata_val if nodata_val is not None else None
+            )
+
             src_ds = None
-            if err is None:
-                raise Exception(f"Falha ao criar crop para {url}")
-            err = None  # fecha/flusha o dataset de saída do Translate
+            if warp_result is None:
+                raise Exception(f"Falha ao reamostrar cena: {url}")
 
-            crop_ds = gdal.Open(mem_crop_path)
+            warp_result = None
+
+            crop_ds = gdal.Open(resampled_path)
             if crop_ds is None:
-                raise Exception(f"Crop não gerado para {url}")
-
-            if template_geotransform is None:
-                template_geotransform = crop_ds.GetGeoTransform()
-                template_projection = crop_ds.GetProjection()
-                template_shape = (crop_ds.RasterYSize, crop_ds.RasterXSize)
-            else:
-                resampled_path = f"/vsimem/resampled_{i}.tif"
-                warp_result = gdal.Warp(
-                                resampled_path, crop_ds,
-                                width=template_shape[1],
-                                height=template_shape[0],
-                                outputBounds=[
-                                    template_geotransform[0],
-                                    template_geotransform[3] + template_geotransform[5] * template_shape[0],
-                                    template_geotransform[0] + template_geotransform[1] * template_shape[1],
-                                    template_geotransform[3]
-                                ],
-                                resampleAlg='bilinear'
-                            )
-                crop_ds = None
-                gdal.Unlink(mem_crop_path)
-            
-                if warp_result is None:
-                    raise Exception(f"Falha ao reamostrar cena: {url}")
-                warp_result = None  # fecha/flusha o dataset para garantir gravação em /vsimem/
-            
-                crop_ds = gdal.Open(resampled_path)
-                if crop_ds is None:
-                    raise Exception(f"Falha ao abrir resampled para {url}")
-                mem_crop_path = resampled_path
+                raise Exception(f"Falha ao abrir resampled para {url}")
 
             array = crop_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+
+            # --- CORREÇÃO 1 (continuação): máscara opcional ---
+            if nodata_val is not None:
+                array[array == nodata_val] = np.nan
+            # Se não há nodata, o array permanece como lido (valores baixos não serão NaN)
+
+            valid_frac = np.count_nonzero(~np.isnan(array)) / array.size
+            self.radar_log_output.append(f"   -> pixels válidos: {valid_frac*100:.1f}%")
+            QApplication.processEvents()
+
             arrays.append(array)
             crop_ds = None
-            gdal.Unlink(mem_crop_path)
-
-        shapes = {a.shape for a in arrays}
-        if len(shapes) > 1:
-            raise Exception(f"Cenas com shapes diferentes após o recorte/reamostragem: {shapes}")
+            gdal.Unlink(resampled_path)
 
         self.radar_log_output.append("Recorte e alinhamento concluídos.")
         QApplication.processEvents()
 
         filtered_arrays = self.apply_orbit_filter(arrays, orbits)
 
+        # ---------------------------------------------------------------
+        # 3) Merge das cenas do MESMO dia -> 1 raster por data.
+        #    Igual ao R: terra::merge (primeira cena vence, preenche NaN
+        #    com a próxima), NÃO é média.
+        # ---------------------------------------------------------------
         date_to_indices = {}
-        for i, dt_str in enumerate(raw_datetimes):
-            dt = _parse_iso(dt_str).date()
-            if dt not in date_to_indices:
-                date_to_indices[dt] = []
-            date_to_indices[dt].append(i)
+        for i, dt in enumerate(calendar_dates_full):
+            date_to_indices.setdefault(dt, []).append(i)
 
         date_rasters = []
         for dt in sorted(date_to_indices.keys()):
             idxs = date_to_indices[dt]
-            if len(idxs) == 1:
-                date_rasters.append(filtered_arrays[idxs[0]])
+            same_day = [filtered_arrays[i] for i in idxs]
+            if len(same_day) == 1:
+                date_rasters.append(same_day[0])
             else:
-                stack = np.stack([filtered_arrays[i] for i in idxs], axis=0)
-                mean_arr = np.mean(stack, axis=0)
-                date_rasters.append(mean_arr)
+                self.radar_log_output.append(f"Merge de {len(same_day)} cenas do mesmo dia ({dt})...")
+                date_rasters.append(self._merge_first_valid(same_day))
 
-        final_array = np.mean(np.stack(date_rasters, axis=0), axis=0)
+        # ---------------------------------------------------------------
+        # 4) Raster final: MÉDIA entre as datas, ignorando NaN por pixel.
+        #    Equivalente a terra::mosaic(sprc(date_rasters), fun="mean").
+        # ---------------------------------------------------------------
+        with np.errstate(invalid='ignore'):
+            final_array = np.nanmean(np.stack(date_rasters, axis=0), axis=0)
 
         return {
             'array': final_array,
@@ -1789,11 +1833,15 @@ class BDCDialog(QtWidgets.QDialog):
 
     def apply_orbit_filter(self, arrays, orbits):
         n = len(arrays)
-        smoothed = [uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
+        smoothed = [self.nan_uniform_filter(arr, size=3, mode='reflect').astype(np.float32) for arr in arrays]
+
+        # Divisão segura: onde o denominador é zero, o resultado é 0 (evita NaN)
         ratios = []
         for i in range(n):
             with np.errstate(divide='ignore', invalid='ignore'):
-                rat = np.divide(arrays[i], smoothed[i], out=np.zeros_like(arrays[i]), where=smoothed[i]>0)
+                rat = np.divide(arrays[i], smoothed[i],
+                                out=np.zeros_like(arrays[i]),
+                                where=smoothed[i] != 0)
             ratios.append(rat)
 
         filtered = [None] * n
@@ -1801,7 +1849,9 @@ class BDCDialog(QtWidgets.QDialog):
         for orb in unique_orbits:
             idx = [i for i, o in enumerate(orbits) if o == orb]
             stack_ratios = np.stack([ratios[i] for i in idx], axis=0)
-            outcore = np.mean(stack_ratios, axis=0)
+            # Média ignorando NaN (caso ainda exista)
+            with np.errstate(invalid='ignore'):
+                outcore = np.nanmean(stack_ratios, axis=0)
             for i in idx:
                 filtered[i] = smoothed[i] * outcore
         return filtered
@@ -1860,6 +1910,9 @@ class BDCDialog(QtWidgets.QDialog):
             self.radar_log_output.append("\n--- Convertendo para dB, esticando e projetando... ---")
             QApplication.processEvents()
 
+            ref_geotransform_10m = None
+            ref_shape_10m = None
+
             for label in ["current", "4m", "8m"]:
                 arr = mosaics[label]['array']
                 gt = mosaics[label]['geotransform']
@@ -1867,7 +1920,8 @@ class BDCDialog(QtWidgets.QDialog):
 
                 db = 10 * np.log10(np.maximum(arr, 1e-10))
                 db_clamped = np.clip(db, lower, upper)
-                stretched = ((db_clamped - lower) / (upper - lower) * 254).astype(np.uint8)
+                stretched = ((db_clamped - lower) / (upper - lower) * 254)
+                stretched = np.nan_to_num(stretched, nan=255).astype(np.uint8)
 
                 temp_stretch = os.path.join(folder, f"temp_{label}_stretch.tif")
                 temp_files.append(temp_stretch)
@@ -1876,15 +1930,46 @@ class BDCDialog(QtWidgets.QDialog):
                 ds_tmp.SetGeoTransform(gt)
                 ds_tmp.SetProjection(proj)
                 ds_tmp.GetRasterBand(1).WriteArray(stretched)
+                ds_tmp.GetRasterBand(1).SetNoDataValue(255)
                 ds_tmp.FlushCache()
                 ds_tmp = None
 
                 temp_proj = os.path.join(folder, f"temp_{label}_proj.tif")
                 temp_files.append(temp_proj)
-                gdal.Warp(temp_proj, temp_stretch,
-                          dstSRS='EPSG:10857',
-                          xRes=10, yRes=10,
-                          resampleAlg='near')
+
+                if label == "current":
+                    # Define a grade de referência em EPSG:10857 — equivalente a
+                    # vh_atual_10m <- project(vh_atual_img, "EPSG:10857", res=10)
+                    gdal.Warp(temp_proj, temp_stretch,
+                              dstSRS='EPSG:10857',
+                              xRes=10, yRes=10,
+                              resampleAlg='bilinear',
+                              srcNodata=255, dstNodata=255)
+
+                    ref_ds = gdal.Open(temp_proj)
+                    ref_geotransform_10m = ref_ds.GetGeoTransform()
+                    ref_shape_10m = (ref_ds.RasterYSize, ref_ds.RasterXSize)
+                    ref_ds = None
+                else:
+                    # "4m" e "8m" usam a MESMA grade de "current" como template —
+                    # equivalente a project(vh_4m_img, vh_atual_10m) /
+                    # project(vh_8m_img, vh_atual_10m) no R. Isso garante
+                    # alinhamento pixel-a-pixel exato entre as 3 bandas finais.
+                    ref_gt = ref_geotransform_10m
+                    ref_bounds = [
+                        ref_gt[0],
+                        ref_gt[3] + ref_gt[5] * ref_shape_10m[0],
+                        ref_gt[0] + ref_gt[1] * ref_shape_10m[1],
+                        ref_gt[3]
+                    ]
+                    gdal.Warp(temp_proj, temp_stretch,
+                              dstSRS='EPSG:10857',
+                              width=ref_shape_10m[1],
+                              height=ref_shape_10m[0],
+                              outputBounds=ref_bounds,
+                              resampleAlg='bilinear',
+                              srcNodata=255, dstNodata=255)
+
                 projected_tifs.append(temp_proj)
 
             output_name = f"{tile}_VH_RGB_mean_temporal_10m.tif"
