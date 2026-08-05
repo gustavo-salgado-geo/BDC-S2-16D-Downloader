@@ -161,7 +161,7 @@ class BDCDialog(QtWidgets.QDialog):
         main_layout.addLayout(folder_layout)
 
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalizar RGB para 8 bits (padrão: manter dado original)")
-        self.normalize_checkbox.setChecked(False)
+        self.normalize_checkbox.setChecked(True)
         main_layout.addWidget(self.normalize_checkbox)
 
         self.download_button_alt = QtWidgets.QPushButton("Opção 1 >>>>>  Criar VRT da Composição RGB (R11_G08_B04) - Para Visualização Rápida")
@@ -583,7 +583,7 @@ class BDCDialog(QtWidgets.QDialog):
         array_max = np.max(array)
         return (((array - array_min) / (array_max - array_min)) * 255).astype(np.uint8)
 
-    def create_rgb(self, r, g, b, output_path, projection, geotransform, normalize=False):
+    def create_rgb(self, r, g, b, output_path, projection, geotransform, normalize):
         driver = gdal.GetDriverByName('GTiff')
         if normalize:
             out_dtype = gdal.GDT_Byte
