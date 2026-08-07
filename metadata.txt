@@ -1,11 +1,11 @@
 [general]
 name=BDC Sentinel-2/MSI 16-D Downloader
 description=Download e processamento automatizado de cubos Sentinel-2 16D do Brazil Data Cube.
-about=Este plugin automatiza o download de bandas, cria composições RGB (B11-B08-B04), gera máscaras de nuvens vetorizadas (SCL) com limpeza de áreas menores que 1ha e organiza as camadas no projeto.
-version=0.1
+about=Este plugin automatiza o download de bandas, cria composições RGB (B11-B08-B04), gera máscaras de nuvens vetorizadas (SCL) com limpeza de áreas menores que 1ha e organiza as camadas no projeto, gera composições temporais de imagens de radar Sentinel-1.
+version=0.2
 qgisMinimumVersion=3.10
-author=[Gustavo Piva Lopes Salgado]
-email=[gustavo.salgado@inpe.br]
+author=[Gustavo Piva Lopes Salgado, Guilherme Gomes Correia]
+email=[gustavo.salgado@inpe.br, guilherme.correia@inpe.br]
 
 repository=https://github.com/gustavo-salgado-geo/pluginqgis-bdc-s2-16d-downloader
 tracker=https://github.com/gustavo-salgado-geo/pluginqgis-bdc-s2-16d-downloader/issues
