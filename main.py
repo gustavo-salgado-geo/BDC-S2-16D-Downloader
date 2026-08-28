@@ -160,7 +160,7 @@ class BDCDialog(QtWidgets.QDialog):
         main_layout.addWidget(QtWidgets.QLabel("Pasta de destino:"))
         main_layout.addLayout(folder_layout)
 
-        self.normalize_checkbox = QtWidgets.QCheckBox("Normalizar RGB para 8 bits (padrão: manter dado original)")
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalizar RGB para 8 bits")
         self.normalize_checkbox.setChecked(True)
         main_layout.addWidget(self.normalize_checkbox)
 
