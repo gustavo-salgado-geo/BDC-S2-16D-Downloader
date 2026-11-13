@@ -173,7 +173,7 @@ class BDCDialog(QtWidgets.QDialog):
         main_layout.addWidget(self.download_button)
 
         self.band_checkboxes = {}
-        bands = ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "B12", "NDVI", "EVI", "NBR", "SCL"]
+        bands = ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "B12", "NDVI", "EVI", "NBR", "SCL", "PROVENANCE"]
         band_group = QtWidgets.QGroupBox("Selecionar bandas para download individual, caso deseje utilizar a opção 3:")
         band_layout = QtWidgets.QGridLayout()
         for i, band in enumerate(bands):
@@ -289,7 +289,19 @@ class BDCDialog(QtWidgets.QDialog):
         if folder:
             self.folder_input.setText(folder)
 
+    def _log_exception(self, where):
+        import traceback
+        self.tiles_processed_output.append(f"❌ ERRO INESPERADO em {where}:")
+        self.tiles_processed_output.append(traceback.format_exc())
+        QtWidgets.QApplication.processEvents()
+
     def executar_opcao_2_completa(self):
+        try:
+            self._executar_opcao_2_impl()
+        except Exception:
+            self._log_exception("Opção 2")
+
+    def _executar_opcao_2_impl(self):
         self.process_rgb(["B11", "B08", "B04"])
         self.tiles_processed_output.append("\n--- Iniciando download da banda PROVENANCE ---")
         QtWidgets.QApplication.processEvents()
@@ -434,6 +446,12 @@ class BDCDialog(QtWidgets.QDialog):
         self.tiles_processed_output.append(">>> Processo Opção 4 Concluído! <<<")
 
     def process_rgb(self, band_order):
+        try:
+            self._process_rgb_impl(band_order)
+        except Exception:
+            self._log_exception("process_rgb")
+
+    def _process_rgb_impl(self, band_order):
         tiles_input = self.tile_input.text().strip()
         tiles = [tile.strip() for tile in re.split(r'[,; ]+', tiles_input) if tile.strip()]
         raw_date = self.date_input.text().strip()
@@ -470,59 +488,75 @@ class BDCDialog(QtWidgets.QDialog):
         year, month, day = date_str[:4], date_str[4:6], date_str[6:8]
         normalize = self.normalize_checkbox.isChecked()
 
+        # Processamento 100% via GDAL (sem numpy/ReadAsArray): evita o erro
+        # "TypeError: not a numpy array" causado por incompatibilidade numpy x GDAL.
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
+
         for tile in tiles:
             bbb, ppp = tile[:3], tile[3:]
             url_base = f"https://data.inpe.br/bdc/data/s2-16d/v2/{bbb}/{ppp}/{year}/{month}/{day}/S2-16D_V2_{bbb}{ppp}_{date_str}"
-            band_data = {}
-            projection, geotransform = None, None
+            sources = []
+            ok = True
             for band_key in band_order:
                 url = f"{url_base}_{band_key}.tif"
-                base_name = url.split('/')[-1]
-                self.tiles_processed_output.append(f"Baixando: {base_name}")
+                self.tiles_processed_output.append(f"Acessando: {url.split('/')[-1]}")
                 QApplication.processEvents()
-                band_bytes = self.download_file_to_memory(url)
-                if band_bytes is None:
-                    self.tiles_processed_output.append(f"❌ Não existe dados para a data informada!")
-                    return
-                vsimem_path = f"/vsimem/{tile}_{band_key}.tif"
-                gdal.FileFromMemBuffer(vsimem_path, band_bytes.getvalue())
-                ds = gdal.Open(vsimem_path)
-                if ds is None:
-                    self.tiles_processed_output.append(f"❌ Falha ao abrir {band_key} em memória.")
-                    return
-                band_data[band_key] = ds.GetRasterBand(1).ReadAsArray()
-                if band_key == band_order[0]:
-                    projection = ds.GetProjection()
-                    geotransform = ds.GetGeoTransform()
-
-            if any(b not in band_data for b in band_order):
-                self.tiles_processed_output.append(f"❌ Bandas incompletas para {tile}.")
-                continue
+                src = f"/vsicurl/{url}"
+                try:
+                    test_ds = gdal.Open(src)
+                except RuntimeError:
+                    test_ds = None
+                if test_ds is None:
+                    self.tiles_processed_output.append("❌ Não existe dados para a data informada!")
+                    ok = False
+                    break
+                test_ds = None
+                sources.append(src)
+            if not ok:
+                return
 
             sufixo = "8bit" if normalize else "orig"
             output_name = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}_{sufixo}.tif"
             output_path = os.path.join(folder, output_name)
             output_layer = f"S2-16D_V2_{tile}_{date_str}_{''.join(band_order)}_{sufixo}"
 
-            self.create_rgb(
-                band_data[band_order[0]],
-                band_data[band_order[1]],
-                band_data[band_order[2]],
-                output_path, projection, geotransform,
-                normalize=normalize
-            )
+            vrt_tmp = f"/vsimem/{tile}_{date_str}_rgb.vrt"
+            vrt = gdal.BuildVRT(vrt_tmp, sources, options=gdal.BuildVRTOptions(separate=True))
+            if vrt is None:
+                self.tiles_processed_output.append(f"❌ Falha ao montar composição para {tile}.")
+                continue
+
+            self.tiles_processed_output.append(f"Baixando e gravando {output_name} (pode demorar)...")
+            QApplication.processEvents()
+
+            translate_kwargs = dict(format="GTiff", creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"])
+            if normalize:
+                scale_params = []
+                for i in range(1, vrt.RasterCount + 1):
+                    b = vrt.GetRasterBand(i)
+                    bmin, bmax = b.ComputeRasterMinMax(False)
+                    if bmax == bmin:
+                        bmax = bmin + 1
+                    scale_params.append([bmin, bmax, 0, 255])
+                translate_kwargs.update(outputType=gdal.GDT_Byte, scaleParams=scale_params)
+            vrt.FlushCache()
+            out = gdal.Translate(output_path, vrt, **translate_kwargs)
+            vrt = None
+            gdal.Unlink(vrt_tmp)
+            if out is None:
+                self.tiles_processed_output.append(f"❌ Falha ao gravar {output_name}")
+                continue
+            out = None
+
             raster_layer = QgsRasterLayer(output_path, output_layer)
             if raster_layer.isValid():
                 QgsProject.instance().addMapLayer(raster_layer)
                 self.tiles_processed_output.append(f"✅ RGB criado: {output_name}")
-                self.tiles_processed_output.append(f"-------------------------------------------------")
-                self.tiles_processed_output.append(f"")
             else:
                 self.tiles_processed_output.append(f"❌ Falha ao carregar camada: {tile}")
-                self.tiles_processed_output.append(f"-------------------------------------------------")
-                self.tiles_processed_output.append(f"")
-            for band_key in band_order:
-                gdal.Unlink(f"/vsimem/{tile}_{band_key}.tif")
+            self.tiles_processed_output.append("-------------------------------------------------")
+            self.tiles_processed_output.append("")
         QtWidgets.QMessageBox.information(self, "Finalização", "Geração de RGB Concluído!")
 
     def download_selected_bands(self):
@@ -581,6 +615,8 @@ class BDCDialog(QtWidgets.QDialog):
     def normalize_to_8bit(self, array):
         array_min = np.min(array)
         array_max = np.max(array)
+        if array_max == array_min:
+            return np.zeros(array.shape, dtype=np.uint8)
         return (((array - array_min) / (array_max - array_min)) * 255).astype(np.uint8)
 
     def create_rgb(self, r, g, b, output_path, projection, geotransform, normalize):
@@ -616,7 +652,7 @@ class BDCDialog(QtWidgets.QDialog):
                 r.raise_for_status()
                 return BytesIO(r.content)
         except Exception as e:
-            print(f"Erro ao baixar: {e}")
+            self.tiles_processed_output.append(f"⚠️ Falha no download: {e}")
             return None
 
     def search_stac_item(self, tile, date_str):
